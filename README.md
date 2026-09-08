@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Solo Frontend Forge
 
 build the full frontend alone
@@ -22,3 +23,7 @@ cd <repository-name>
 npm i
 npm run dev
 ```
+=======
+# Helix
+AI Engineering OS that orchestrates intelligent agents to plan, build, test, secure, and manage software.
+>>>>>>> 17defac558deaae9097a765218562c323cd2b4ad
