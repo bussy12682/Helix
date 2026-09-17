@@ -1,165 +1,154 @@
-# HELIX
+# HELIX — AI Engineering Operating System
 
-AI Engineering OS for orchestrating intelligent agents to plan, build, test, secure, and manage software.
+**Build software at the speed of thought.**
 
-HELIX is a full-stack TypeScript and JavaScript project that blends a React/TanStack frontend, an authentication API, project creation flows, password-reset and email-verification flows, optional Google/GitHub OAuth, and AI-backed project analysis and voice workflows.
+HELIX is an autonomous AI Engineering Operating System that coordinates nine specialized AI agents to plan, architect, implement, review, test, secure, containerize, and document production-grade software applications.
 
-## Project overview
+Rather than relying on isolated chatbots or monolithic prompts, HELIX operates as a structured engineering workforce governed by explicit role contracts, deterministic JSON schemas, a Directed Acyclic Graph (DAG) orchestration engine, permissioned tool execution, and interactive human approval checkpoints.
 
-HELIX turns software delivery into an engineering workspace that combines:
+---
 
-- Product and project planning
-- Secure authentication and session management
-- Email verification and password reset flows
-- Project creation, document extraction, AI analysis, and dashboard reporting
-- Agent-style workflow scaffolding for future AI orchestration
-- A UI inspired by a modern HELIX engineering office
+## Key Features
+
+- **9 Specialized AI Agents**:
+  - **Product Manager AI** (`pm`): Turns raw user input into PRDs, User Stories, and Gherkin acceptance criteria.
+  - **System Architect AI** (`arch`): Designs system topology, component boundaries, tech stack ADRs, and OpenAPI 3.0 contracts.
+  - **Database Engineer AI** (`db`): Models relational entity schemas, migrations, constraints, and query indexes.
+  - **Backend Engineer AI** (`be`): Implements REST endpoints, business validation, authentication, and service logic.
+  - **Frontend Engineer AI** (`fe`): Constructs responsive React/TanStack UI components with Tailwind CSS and client hooks.
+  - **Security Engineer AI** (`sec`): Executes OWASP Top 10 threat modeling, auth audits, and vulnerability checks.
+  - **QA Engineer AI** (`qa`): Authors automated test plans, validates PRD acceptance criteria, and issues PASS/FAIL status.
+  - **DevOps Engineer AI** (`devops`): Generates production Dockerfiles, docker-compose setups, and GitHub Actions CI/CD.
+  - **Documentation Engineer AI** (`docs`): Synthesizes comprehensive README.md files, API reference docs, and setup runbooks.
+- **Topological DAG Orchestration**: Executes tasks step-by-step based on topological dependencies with parallel dispatch for independent tasks.
+- **Human Approval Checkpoints**: Interactive gates pausing execution for human sign-off on Architecture and Production Releases.
+- **Automated Review Loops**: Security vulnerabilities or QA test failures automatically trigger structured revision cycles back to engineers.
+- **Model Router & Provider Abstraction**:
+  - Routes requests dynamically based on cognitive tiers (`Reasoning`, `Coding`, `Fast`).
+  - Supports **Google Gemini**, **OpenAI**, **xAI**, local **Ollama** models (`http://localhost:11434`), and zero-config **Offline Mocks**.
+- **Context Isolation**: Each agent receives only relevant upstream artifacts to prevent prompt bloat and cross-agent leakage.
+- **Permissioned Virtual Tools**: Controlled tool execution including `virtual_workspace_write`, `virtual_workspace_read`, `syntax_validate`, `security_analyzer`, and `test_runner`.
+- **Live AI Office Floor**: Real-time event streaming via Server-Sent Events (SSE), showing live agent progress, active tasks, and an interactive artifact inspector.
+
+---
 
 ## Architecture
 
-The repository is organized into two major layers:
+The project is structured into two main layers:
 
-- Frontend: a TanStack Router / React / Vite project under `src/`
-- Backend: a Node HTTP app with Express-style route dispatching under `backend/`
+- **Frontend**: A TanStack Router / React 19 / Vite application under `src/`
+- **Backend**: A Node.js runtime API & AI orchestration engine under `backend/`
 
-Core files:
+```text
+backend/
+├── ai/
+│   ├── contracts.js          # Explicit contracts & metadata for the 9 agents
+│   ├── schemas.js            # Structured JSON schemas & validation rules
+│   ├── model-router.js       # Dynamic provider router & cognitive tiering
+│   ├── context-manager.js    # Workspace memory & context isolation engine
+│   ├── tool-registry.js      # Permissioned virtual tool execution system
+│   ├── observability.js      # Execution tracing & SSE telemetry emitter
+│   ├── orchestrator.js       # DAG task engine & review loop runner
+│   ├── agents/               # Individual agent implementations
+│   └── index.js              # Central AI subsystem factory
+├── app.js                    # HTTP dispatcher & API endpoints
+├── config.js                 # Environment & model configuration loader
+├── storage.js                # State persistence engine
+└── tests/                    # 26 automated unit, integration, & benchmark tests
+```
 
-- `backend/app.js` — main request router and API handlers
-- `backend/config.js` — environment and runtime configuration loader
-- `backend/storage.js` — in-memory or persistent storage controller
-- `backend/email.js` — SMTP, SendGrid, or demo email transport
-- `backend/ai.js` — AI provider integration for analysis and voice routes
-- `src/lib/api.ts` — frontend API client wrapper
-- `src/routes/` — UI routes such as login, signup, dashboard, and auth callbacks
+---
 
-## Authentication flow
+## Quick Start
 
-The backend supports:
+### 1. Prerequisites
+- **Node.js** (v20+ recommended)
+- **npm**
 
-- Email/password account creation through `POST /api/v1/auth/register`
-- Email verification through `POST /api/v1/auth/verify-email`
-- Login through `POST /api/v1/auth/login`
-- Password reset request and completion endpoints
-- Optional Google OAuth and GitHub OAuth callbacks
-
-The default local server configuration uses a memory store and a demo email provider, so account creation and login work locally without external SMTP credentials. In production or a real deployment, you can set SMTP or SendGrid credentials and external OAuth credentials.
-
-## Local setup
-
-### Prerequisites
-
-- Node.js
-- npm
-- A GitHub or Google OAuth app for external authentication if you want to enable OAuth
-- Optional SMTP or SendGrid credentials for production email delivery
-
-### Install dependencies
-
+### 2. Install Dependencies
 ```sh
 npm install
 ```
 
-### Configure environment
-
-Create a local environment file from the example:
-
+### 3. Configure Environment
+Copy the example environment configuration:
 ```sh
 cp .env.example .env.local
 ```
 
-The local environment file contains values such as:
-
+Key environment variables:
 ```env
 NODE_ENV=development
 APP_PORT=3001
 APP_NAME=HELIX
 BASE_URL=http://localhost:5173
 JWT_SECRET=change-me-to-a-secure-random-string
-DATABASE_URL=
 HELIX_STORAGE_PATH=.data/helix-state.json
 EMAIL_PROVIDER=demo
-VITE_API_BASE_URL=http://localhost:3001
+
+# AI Provider Configuration (optional; defaults to offline mock mode if unconfigured)
+AI_PROVIDER=google                     # 'google', 'openai', 'xai', or 'ollama'
+GOOGLE_AI_API_KEY=your-gemini-api-key
+AI_MODEL=gemini-2.5-flash
+# OLLAMA_BASE_URL=http://localhost:11434
 ```
 
-Use `EMAIL_PROVIDER=demo` while testing locally if you do not have SMTP credentials configured. The demo email provider will print the verification token to the backend console.
-
-### Run locally
-
-Start the backend API:
-
+### 4. Run the Application locally
+Start the backend API server:
 ```sh
 node backend/index.js
 ```
 
-Then start the frontend:
-
+In a separate terminal, start the frontend development server:
 ```sh
 npm run dev
 ```
 
-The frontend uses the Vite development server at the default Vite port. The backend runs on port `3001` by default.
+Open `http://localhost:5173` in your browser.
 
-## Available routes
+---
 
-The frontend route tree includes major app surfaces such as:
+## Testing & Evaluation
 
-- `/login`
-- `/signup`
-- `/verify-email`
-- `/forgot-password`
-- `/dashboard`
-- `/projects`
-- `/deployments`
-- `/integrations`
-- `/security`
-- `/auth/google/callback`
-- `/auth/github/callback`
+HELIX includes an automated test and benchmark suite covering contracts, schemas, ModelRouter, DAG orchestrator execution, human approval gates, and end-to-end multi-agent evaluation:
 
-## Backend API shape
+```sh
+node --test backend/tests/*.js
+```
 
-The main public API groups are:
+---
 
-- `GET /api/v1/health`
-- `POST /api/v1/auth/register`
-- `POST /api/v1/auth/login`
-- `POST /api/v1/auth/google/callback`
-- `POST /api/v1/auth/github/callback`
-- `POST /api/v1/auth/password-reset/request`
-- `POST /api/v1/auth/password-reset/complete`
-- `POST /api/v1/auth/verify-email`
+## API Summary
 
-Project and document routes include:
+### Authentication
+- `POST /api/v1/auth/register` — Create user account
+- `POST /api/v1/auth/login` — Authenticate user and issue session token
+- `POST /api/v1/auth/verify-email` — Complete email verification
 
-- `GET /api/v1/projects`
-- `POST /api/v1/projects`
-- `GET /api/v1/projects/:id`
-- `DELETE /api/v1/projects/:id`
-- `POST /api/v1/projects/analyze`
-- `POST /api/v1/projects/extract-document`
+### Projects & Ingestion
+- `GET /api/v1/projects` — List workspace projects
+- `POST /api/v1/projects` — Create new project
+- `POST /api/v1/projects/analyze` — Analyze brief via PM agent
+- `POST /api/v1/projects/extract-document` — Extract text from PDF, DOCX, or Markdown specs
+- `POST /api/v1/voice/transcribe` — Transcribe voice note
 
-## AI and project support
+### AI Workforce & Orchestration
+- `POST /api/v1/projects/:id/workflows` — Initialize and start 9-agent workflow
+- `GET /api/v1/projects/:id/workflows` — Retrieve current workflow state and task DAG
+- `GET /api/v1/projects/:id/office` — Retrieve live floor state for the 9 agents
+- `GET /api/v1/projects/:id/artifacts` — Fetch generated workspace files & code
+- `GET /api/v1/projects/:id/workflows/stream` — SSE real-time telemetry stream
+- `POST /api/v1/workflows/:id/approve` — Submit Human Approval checkpoint decision
+- `GET /api/v1/workflows/:id/traces` — Retrieve execution spans and telemetry metrics
 
-The project includes AI-backed features for:
+---
 
-- Project brief analysis
-- Voice-turn handling
-- Voice note transcription via Google/Gemini-compatible endpoints
-- Document text extraction for Markdown, Markdown-like documents, TXT, PDF, and DOCX files
+## Documentation
 
-The configuration loader supports the same provider family in several environments:
+Detailed technical documentation is available in [`docs/AI_ARCHITECTURE.md`](docs/AI_ARCHITECTURE.md).
 
-- `google`
-- `openai`
-- `xai`
-
-## Security
-
-The backend performs password verification using a server-side hash with the configured JWT secret and supports a session token model. Password validation and rate limiting are included in the route handlers.
-
-## Demo and development notes
-
-The repository contains a safe-memory database fallback that allows the system to initialize without a `DATABASE_URL`. This means the app can run in an offline or local demo environment without an external Postgres service. The demo email provider logs tokens to the console, ensuring signup and email verification can be tested without real SMTP credentials.
+---
 
 ## License
 
-This repository is published as a HELIX codebase for local development and engineering orchestration workflows.
+Published under the MIT License.
