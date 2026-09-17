@@ -397,3 +397,88 @@ function calculatePasswordStrength(password: string): PasswordStrength {
   if (strength <= 5) return 'good';
   return 'strong';
 }
+
+export type OfficeAgent = {
+  id: string;
+  role: string;
+  name: string;
+  title: string;
+  initials: string;
+  description: string;
+  category: string;
+  status: 'working' | 'queued' | 'done' | 'idle' | 'awaiting_approval' | 'failed';
+  progress: number;
+  currentTask: string;
+};
+
+export type OfficeTask = {
+  id: string;
+  agent: string;
+  role: string;
+  task: string;
+  status: 'queued' | 'running' | 'completed' | 'awaiting_approval' | 'needs_revision' | 'failed';
+  progress: number;
+  summary: string | null;
+  requiresApproval: string | null;
+};
+
+export type OfficeFloorState = {
+  hasActiveWorkflow: boolean;
+  workflowId?: string;
+  workflowStatus: 'pending' | 'running' | 'awaiting_approval' | 'completed' | 'failed' | 'idle';
+  currentCheckpoint: {
+    taskId: string;
+    checkpointType: string;
+    agent: string;
+    title: string;
+    summary: string;
+  } | null;
+  agents: OfficeAgent[];
+  tasks: OfficeTask[];
+};
+
+export async function startProjectWorkflow(projectId: string, token: string) {
+  return apiRequest<any>(`/api/v1/projects/${projectId}/workflows`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getProjectOffice(projectId: string, token: string) {
+  return apiRequest<OfficeFloorState>(`/api/v1/projects/${projectId}/office`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getProjectArtifacts(projectId: string, token: string) {
+  return apiRequest<{ artifacts: Array<{ name: string; type: string; path: string; content: string; version: number }> }>(
+    `/api/v1/projects/${projectId}/artifacts`,
+    {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
+}
+
+export async function approveWorkflowCheckpoint(
+  workflowId: string,
+  checkpointType: string,
+  approved: boolean,
+  comments: string,
+  token: string,
+) {
+  return apiRequest<any>(`/api/v1/workflows/${workflowId}/approve`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ checkpointType, approved, comments }),
+  });
+}
+
+export async function getWorkflowTraces(workflowId: string, token: string) {
+  return apiRequest<{ metrics: any; traces: any[] }>(`/api/v1/workflows/${workflowId}/traces`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+

@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { analyzeProject, createProject, getStoredSessionToken, type ProjectAnalysis } from "@/lib/api";
+import { analyzeProject, createProject, getStoredSessionToken, startProjectWorkflow, type ProjectAnalysis } from "@/lib/api";
 
 export const Route = createFileRoute("/projects/summary")({
   head: () => ({
@@ -106,14 +106,16 @@ function Summary() {
 
     setIsConfirming(true);
     try {
-      await createProject({
+      const created = await createProject({
         name: analysis.name.trim(),
         description: analysis.description.trim(),
         keyFeatures: analysis.keyFeatures.map((feature) => feature.trim()).filter(Boolean),
         techStack: analysis.techStack.map((technology) => technology.trim()).filter(Boolean),
       }, token);
       sessionStorage.removeItem('helix_project_analysis');
-      toast.success('Project created. Your HELIX office is ready.');
+      sessionStorage.setItem('helix_active_project_id', created.id);
+      await startProjectWorkflow(created.id, token).catch(() => null);
+      toast.success('Project created. Your HELIX AI engineering team is active.');
       navigate({ to: '/office' });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Could not create project.');

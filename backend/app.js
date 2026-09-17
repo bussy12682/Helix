@@ -8,10 +8,12 @@ import { validatePasswordComplexity } from './password-validator.js';
 import { analyzeProjectBrief, respondToVoiceTurn, transcribeVoiceNote } from './ai.js';
 import { extractRawText } from 'mammoth';
 import { PDFParse } from 'pdf-parse';
+import { createAiSubsystem } from './ai/index.js';
 
 export function createApp(overrides = {}) {
   const config = loadConfig(overrides.env ?? process.env);
   const store = createMemoryStore({ storagePath: overrides.storagePath ?? config.storagePath });
+  const ai = overrides.ai ?? createAiSubsystem(config);
   const loginRateLimiter = new RateLimiter();
   const registerRateLimiter = new RateLimiter();
   const passwordResetRateLimiter = new RateLimiter();
@@ -22,13 +24,14 @@ export function createApp(overrides = {}) {
   const app = {
     config,
     store,
+    ai,
     loginRateLimiter,
     registerRateLimiter,
     passwordResetRateLimiter,
     async request(input, init = {}) {
       const request = input instanceof Request ? input : new Request(input, init);
       const requestId = randomUUID();
-      const response = await handleRequest({ request, config, store, loginRateLimiter, registerRateLimiter, passwordResetRateLimiter, requestId });
+      const response = await handleRequest({ request, config, store, ai, loginRateLimiter, registerRateLimiter, passwordResetRateLimiter, requestId });
       response.headers.set('x-request-id', requestId);
       response.headers.set('x-correlation-id', requestId);
       return response;
@@ -39,7 +42,7 @@ export function createApp(overrides = {}) {
   return app;
 }
 
-async function handleRequest({ request, config, store, loginRateLimiter, registerRateLimiter, passwordResetRateLimiter, requestId }) {
+async function handleRequest({ request, config, store, ai, loginRateLimiter, registerRateLimiter, passwordResetRateLimiter, requestId }) {
   const url = new URL(request.url);
   const path = url.pathname;
 
@@ -120,6 +123,35 @@ async function handleRequest({ request, config, store, loginRateLimiter, registe
 
   if (request.method === 'POST' && path === '/api/v1/projects/extract-document') {
     return handleExtractProjectDocument({ request, store, requestId });
+  }
+
+  // AI Workflow and Office routes
+  if (request.method === 'POST' && /^\/api\/v1\/projects\/[^/]+\/workflows$/.test(path)) {
+    return handleStartProjectWorkflow({ request, store, ai, requestId, path });
+  }
+
+  if (request.method === 'GET' && /^\/api\/v1\/projects\/[^/]+\/workflows\/stream$/.test(path)) {
+    return handleWorkflowEventsStream({ request, store, ai, requestId, path });
+  }
+
+  if (request.method === 'GET' && /^\/api\/v1\/projects\/[^/]+\/workflows$/.test(path)) {
+    return handleGetProjectWorkflow({ request, store, ai, requestId, path });
+  }
+
+  if (request.method === 'GET' && /^\/api\/v1\/projects\/[^/]+\/office$/.test(path)) {
+    return handleGetProjectOffice({ request, store, ai, requestId, path });
+  }
+
+  if (request.method === 'GET' && /^\/api\/v1\/projects\/[^/]+\/artifacts$/.test(path)) {
+    return handleGetProjectArtifacts({ request, store, ai, requestId, path });
+  }
+
+  if (request.method === 'POST' && /^\/api\/v1\/workflows\/[^/]+\/approve$/.test(path)) {
+    return handleApproveWorkflowCheckpoint({ request, store, ai, requestId, path });
+  }
+
+  if (request.method === 'GET' && /^\/api\/v1\/workflows\/[^/]+\/traces$/.test(path)) {
+    return handleGetWorkflowTraces({ request, store, ai, requestId, path });
   }
 
   if (request.method === 'DELETE' && /^\/api\/v1\/projects\//.test(path)) {
@@ -1099,6 +1131,190 @@ async function handleVerifyEmail({ request, store, requestId }) {
       name: user.name,
       email: user.email,
       emailVerified: user.emailVerified,
+    },
+  });
+}
+
+async function handleStartProjectWorkflow({ request, store, ai, requestId, path }) {
+  const auth = requireAuth(request, store);
+  if ('error' in auth) return auth.error;
+
+  const projectId = path.split('/')[4];
+  const project = store.getProjectById(projectId);
+  if (!project) {
+    return jsonResponse(404, { error: { code: 'NOT_FOUND', message: 'Project not found', requestId } });
+  }
+  if (project.ownerId !== auth.user.id) {
+    return jsonResponse(403, { error: { code: 'FORBIDDEN', message: 'You do not have access to this project', requestId } });
+  }
+
+  let workflow = ai.orchestrator.getWorkflowForProject(projectId);
+  if (!workflow) {
+    workflow = await ai.orchestrator.createWorkflow(projectId, project);
+  }
+
+  ai.orchestrator.runNextSteps(workflow.id).catch((err) => {
+    console.error('[Orchestrator background execution error]:', err);
+  });
+
+  return jsonResponse(201, workflow, { 'x-correlation-id': requestId });
+}
+
+async function handleGetProjectWorkflow({ request, store, ai, requestId, path }) {
+  const auth = requireAuth(request, store);
+  if ('error' in auth) return auth.error;
+
+  const projectId = path.split('/')[4];
+  const project = store.getProjectById(projectId);
+  if (!project) {
+    return jsonResponse(404, { error: { code: 'NOT_FOUND', message: 'Project not found', requestId } });
+  }
+  if (project.ownerId !== auth.user.id) {
+    return jsonResponse(403, { error: { code: 'FORBIDDEN', message: 'You do not have access to this project', requestId } });
+  }
+
+  let workflow = ai.orchestrator.getWorkflowForProject(projectId);
+  if (!workflow) {
+    workflow = await ai.orchestrator.createWorkflow(projectId, project);
+  }
+
+  return jsonResponse(200, workflow, { 'x-correlation-id': requestId });
+}
+
+async function handleGetProjectOffice({ request, store, ai, requestId, path }) {
+  const auth = requireAuth(request, store);
+  if ('error' in auth) return auth.error;
+
+  const projectId = path.split('/')[4];
+  const project = store.getProjectById(projectId);
+  if (!project) {
+    return jsonResponse(404, { error: { code: 'NOT_FOUND', message: 'Project not found', requestId } });
+  }
+  if (project.ownerId !== auth.user.id) {
+    return jsonResponse(403, { error: { code: 'FORBIDDEN', message: 'You do not have access to this project', requestId } });
+  }
+
+  const officeState = ai.orchestrator.getOfficeFloorState(projectId);
+  return jsonResponse(200, officeState, { 'x-correlation-id': requestId });
+}
+
+async function handleGetProjectArtifacts({ request, store, ai, requestId, path }) {
+  const auth = requireAuth(request, store);
+  if ('error' in auth) return auth.error;
+
+  const projectId = path.split('/')[4];
+  const project = store.getProjectById(projectId);
+  if (!project) {
+    return jsonResponse(404, { error: { code: 'NOT_FOUND', message: 'Project not found', requestId } });
+  }
+  if (project.ownerId !== auth.user.id) {
+    return jsonResponse(403, { error: { code: 'FORBIDDEN', message: 'You do not have access to this project', requestId } });
+  }
+
+  const artifacts = ai.contextManager.getArtifacts(projectId);
+  return jsonResponse(200, { artifacts }, { 'x-correlation-id': requestId });
+}
+
+async function handleApproveWorkflowCheckpoint({ request, store, ai, requestId, path }) {
+  const auth = requireAuth(request, store);
+  if ('error' in auth) return auth.error;
+
+  const workflowId = path.split('/')[4];
+  const body = await parseJsonBody(request);
+  const checkpointType = String(body.checkpointType || '');
+  const approved = body.approved !== false;
+  const comments = String(body.comments || '');
+
+  try {
+    const updatedWorkflow = await ai.orchestrator.approveCheckpoint(workflowId, checkpointType, { approved, comments });
+    return jsonResponse(200, updatedWorkflow, { 'x-correlation-id': requestId });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: {
+        code: 'APPROVAL_FAILED',
+        message: error.message,
+        requestId,
+      },
+    });
+  }
+}
+
+async function handleGetWorkflowTraces({ request, store, ai, requestId, path }) {
+  const auth = requireAuth(request, store);
+  if ('error' in auth) return auth.error;
+
+  const workflowId = path.split('/')[4];
+  const traces = ai.observability.getTracesForWorkflow(workflowId);
+  const metrics = ai.observability.getWorkflowMetrics(workflowId);
+
+  return jsonResponse(200, { metrics, traces }, { 'x-correlation-id': requestId });
+}
+
+async function handleWorkflowEventsStream({ request, store, ai, requestId, path }) {
+  const url = new URL(request.url);
+  const token = url.searchParams.get('token') || (request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
+  if (!token) {
+    return jsonResponse(401, { error: { code: 'UNAUTHORIZED', message: 'Missing token', requestId } });
+  }
+
+  const sessionStatus = store.validateSessionExpiration(token);
+  if (!sessionStatus.isValid) {
+    return jsonResponse(401, { error: { code: 'SESSION_EXPIRED', message: 'Invalid or expired session', requestId } });
+  }
+
+  const session = store.getSession(token);
+  if (!session) {
+    return jsonResponse(401, { error: { code: 'UNAUTHORIZED', message: 'Invalid session', requestId } });
+  }
+
+  const projectId = path.split('/')[4];
+
+  let cleanup = null;
+  const stream = new ReadableStream({
+    start(controller) {
+      const encoder = new TextEncoder();
+      const sendData = (payload) => {
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+        } catch {
+          // Stream might be closed by consumer
+        }
+      };
+
+      sendData({ type: 'connected', projectId, timestamp: new Date().toISOString() });
+
+      const listener = (event) => {
+        sendData(event);
+      };
+
+      ai.observability.on('workflow_event', listener);
+
+      const heartbeatTimer = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(': heartbeat\n\n'));
+        } catch {
+          clearInterval(heartbeatTimer);
+          ai.observability.off('workflow_event', listener);
+        }
+      }, 15000);
+
+      cleanup = () => {
+        clearInterval(heartbeatTimer);
+        ai.observability.off('workflow_event', listener);
+      };
+    },
+    cancel() {
+      if (cleanup) cleanup();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+      'x-correlation-id': requestId,
     },
   });
 }
