@@ -8,11 +8,33 @@ Rather than relying on isolated chatbots or monolithic prompts, HELIX operates a
 
 ---
 
+## What's New in V1.0 MVP
+
+- 🚀 **Redesigned Modern Landing Page (`/`)**:
+  - Interactive **9-Agent Workforce Explorer** with model tier mapping and live artifact previews.
+  - Visual **DAG Workflow Diagram** displaying dependency phases and human review checkpoints.
+  - Interactive **Multi-Artifact Code Viewer** displaying production-grade PRDs, PostgreSQL schemas, OpenAPI 3.1 specs, and CI/CD pipelines.
+  - Direct **1-Click Live Demo Access** from navigation and hero sections.
+  - Side-by-side **Comparison Matrix** (Traditional Agency vs. Single AI Copilot vs. HELIX).
+  - Transparent **Pricing Plans** & Interactive **FAQ Accordion**.
+
+- 🔐 **Perfected Authentication Flows**:
+  - **1-Click Demo Login (`POST /api/v1/auth/demo`)**: Jump directly into the live AI office with zero setup friction.
+  - **Live Password Complexity Checklist**: Real-time visual feedback with checkmarks for 8+ characters, uppercase, lowercase, numbers, and special symbols.
+  - **Password Reveal Toggles**: Inline visibility toggles (`Eye` / `EyeOff`) on sign in and sign up forms.
+  - **Quick-Fill Helpers**: 1-click test credential generation on both login and signup.
+  - **Instant Email Verification**: Auto-detects tokens in query parameters with 1-click verification.
+
+- 🧪 **Comprehensive End-to-End Test Suite (27/27 Passing)**:
+  - Added [`backend/tests/real-project-creation.test.js`](backend/tests/real-project-creation.test.js) validating the entire lifecycle: registration $\rightarrow$ verification $\rightarrow$ login $\rightarrow$ demo access $\rightarrow$ real project creation $\rightarrow$ 9-agent DAG workflow $\rightarrow$ human architecture approval $\rightarrow$ human release approval $\rightarrow$ full office state, artifacts, and traces inspection.
+
+---
+
 ## Key Features
 
 - **9 Specialized AI Agents**:
   - **Product Manager AI** (`pm`): Turns raw user input into PRDs, User Stories, and Gherkin acceptance criteria.
-  - **System Architect AI** (`arch`): Designs system topology, component boundaries, tech stack ADRs, and OpenAPI 3.0 contracts.
+  - **System Architect AI** (`arch`): Designs system topology, component boundaries, tech stack ADRs, and OpenAPI 3.1 contracts.
   - **Database Engineer AI** (`db`): Models relational entity schemas, migrations, constraints, and query indexes.
   - **Backend Engineer AI** (`be`): Implements REST endpoints, business validation, authentication, and service logic.
   - **Frontend Engineer AI** (`fe`): Constructs responsive React/TanStack UI components with Tailwind CSS and client hooks.
@@ -21,7 +43,7 @@ Rather than relying on isolated chatbots or monolithic prompts, HELIX operates a
   - **DevOps Engineer AI** (`devops`): Generates production Dockerfiles, docker-compose setups, and GitHub Actions CI/CD.
   - **Documentation Engineer AI** (`docs`): Synthesizes comprehensive README.md files, API reference docs, and setup runbooks.
 - **Topological DAG Orchestration**: Executes tasks step-by-step based on topological dependencies with parallel dispatch for independent tasks.
-- **Human Approval Checkpoints**: Interactive gates pausing execution for human sign-off on Architecture and Production Releases.
+- **Human Approval Checkpoints**: Interactive gates pausing execution for human sign-off on Architecture (`architecture_approval`) and Production Releases (`release_approval`).
 - **Automated Review Loops**: Security vulnerabilities or QA test failures automatically trigger structured revision cycles back to engineers.
 - **Model Router & Provider Abstraction**:
   - Routes requests dynamically based on cognitive tiers (`Reasoning`, `Coding`, `Fast`).
@@ -54,7 +76,7 @@ backend/
 ├── app.js                    # HTTP dispatcher & API endpoints
 ├── config.js                 # Environment & model configuration loader
 ├── storage.js                # State persistence engine
-└── tests/                    # 26 automated unit, integration, & benchmark tests
+└── tests/                    # 27 automated unit, integration, & benchmark tests
 ```
 
 ---
@@ -93,7 +115,7 @@ AI_MODEL=gemini-2.5-flash
 # OLLAMA_BASE_URL=http://localhost:11434
 ```
 
-### 4. Run the Application locally
+### 4. Run the Application Locally
 Start the backend API server:
 ```sh
 node backend/index.js
@@ -116,14 +138,28 @@ HELIX includes an automated test and benchmark suite covering contracts, schemas
 node --test backend/tests/*.js
 ```
 
+### Test Suite Highlights
+- `agent-contracts.test.js` — Validates contracts for all 9 specialized agents.
+- `ai.test.js` — Validates brief analysis, voice transcription, and rate-limiting fallbacks.
+- `benchmark-evaluation.test.js` — End-to-end multi-agent evaluation on an E-commerce platform.
+- `database-foundation.test.js` — Verifies database configuration and safe-mode defaults.
+- `foundation.test.js` — Validates project storage persistence across restarts.
+- `model-router.test.js` — Tests capability tier routing and Ollama endpoint support.
+- `orchestrator-dag.test.js` — Tests DAG dependencies, checkpoint gates, and rejection handling.
+- `workflow-api.test.js` — Tests HTTP API endpoints for workflows, office state, and artifacts.
+- `real-project-creation.test.js` — Complete integration test verifying user auth, project creation, human approval gates, and full 9-agent workforce execution.
+
 ---
 
 ## API Summary
 
 ### Authentication
-- `POST /api/v1/auth/register` — Create user account
+- `POST /api/v1/auth/register` — Create user account with complexity validation
 - `POST /api/v1/auth/login` — Authenticate user and issue session token
+- `POST /api/v1/auth/demo` — Instant 1-click demo login
 - `POST /api/v1/auth/verify-email` — Complete email verification
+- `POST /api/v1/auth/password-reset/request` — Request password reset token
+- `POST /api/v1/auth/password-reset/complete` — Complete password reset
 
 ### Projects & Ingestion
 - `GET /api/v1/projects` — List workspace projects
@@ -131,6 +167,7 @@ node --test backend/tests/*.js
 - `POST /api/v1/projects/analyze` — Analyze brief via PM agent
 - `POST /api/v1/projects/extract-document` — Extract text from PDF, DOCX, or Markdown specs
 - `POST /api/v1/voice/transcribe` — Transcribe voice note
+- `POST /api/v1/voice/turn` — Interactive voice briefing turn
 
 ### AI Workforce & Orchestration
 - `POST /api/v1/projects/:id/workflows` — Initialize and start 9-agent workflow
@@ -152,3 +189,4 @@ Detailed technical documentation is available in [`docs/AI_ARCHITECTURE.md`](doc
 ## License
 
 Published under the MIT License.
+
