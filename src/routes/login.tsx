@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { Github } from "lucide-react";
+import { Eye, EyeOff, Github, Sparkles, Zap } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -9,7 +9,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
-import { ApiRequestError, loginUser, setStoredSessionToken, initiateGoogleOAuth, initiateGitHubOAuth } from "@/lib/api";
+import { ApiRequestError, demoLogin, loginUser, setStoredSessionToken, initiateGoogleOAuth, initiateGitHubOAuth } from "@/lib/api";
 
 function GoogleLogo(props: React.SVGProps<SVGSVGElement>) {
   return (
@@ -35,14 +35,38 @@ export const Route = createFileRoute("/login")({
 });
 
 function Login() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isDemoSubmitting, setIsDemoSubmitting] = useState(false);
   const navigate = useNavigate();
+
+  async function handleDemoSignIn() {
+    setIsDemoSubmitting(true);
+    try {
+      const session = await demoLogin();
+      setStoredSessionToken(session.token);
+      toast.success("Signed in as Demo Engineer! Loading office...");
+      navigate({ to: "/dashboard" });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Demo sign in failed.");
+    } finally {
+      setIsDemoSubmitting(false);
+    }
+  }
+
+  function fillDemoCredentials() {
+    setEmail("demo@helix.app");
+    setPassword("HelixDemo2026!");
+    toast.info("Demo credentials loaded.");
+  }
 
   return (
     <AuthLayout
       title="Welcome back 👋"
-      subtitle="Sign in to your account to rejoin your agents."
+      subtitle="Sign in to your account to rejoin your AI engineering workforce."
       footer={
         <>
           Don't have an account?{" "}
@@ -52,39 +76,71 @@ function Login() {
         </>
       }
     >
+      {/* 1-Click Instant Demo Access Box */}
+      <div className="mb-5 rounded-xl border border-primary/25 bg-primary/5 p-3.5 text-center">
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-left">
+            <p className="text-xs font-semibold text-primary flex items-center gap-1.5">
+              <Sparkles className="h-3.5 w-3.5" /> Testing or evaluating HELIX?
+            </p>
+            <p className="text-[11px] text-muted-foreground mt-0.5">
+              Jump straight into the active engineering office without passwords.
+            </p>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="default"
+            disabled={isDemoSubmitting || isSubmitting}
+            onClick={handleDemoSignIn}
+            className="shrink-0 font-medium text-xs bg-primary hover:bg-primary/90 shadow-sm"
+          >
+            {isDemoSubmitting ? "Entering..." : (
+              <span className="flex items-center gap-1">
+                <Zap className="h-3.5 w-3.5 fill-current" /> Demo Login
+              </span>
+            )}
+          </Button>
+        </div>
+      </div>
+
       <form
         className="space-y-4"
         onSubmit={async (e) => {
           e.preventDefault();
           if (isSubmitting) return;
 
-          const formData = new FormData(e.currentTarget);
           const payload = {
-            email: String(formData.get('email') ?? '').trim(),
-            password: String(formData.get('password') ?? ''),
+            email: email.trim(),
+            password: password,
             rememberMe,
           };
+
+          if (!payload.email || !payload.password) {
+            toast.error("Please enter your email and password.");
+            return;
+          }
 
           setIsSubmitting(true);
           try {
             const session = await loginUser(payload);
             setStoredSessionToken(session.token);
-            toast.success('Signed in — loading your dashboard.');
-            navigate({ to: '/dashboard' });
+            toast.success("Signed in — loading your dashboard.");
+            navigate({ to: "/dashboard" });
           } catch (error) {
-            const message = error instanceof Error ? error.message : 'Login failed.';
-            const errorCode = error instanceof ApiRequestError ? error.code : '';
+            const message = error instanceof Error ? error.message : "Login failed.";
+            const errorCode = error instanceof ApiRequestError ? error.code : "";
             const verificationToken = error instanceof ApiRequestError
               ? error.verificationToken
               : undefined;
-            if (errorCode === 'EMAIL_NOT_VERIFIED' || message.includes('verify your email')) {
-              toast.error('Please verify your email before logging in.');
+            if (errorCode === "EMAIL_NOT_VERIFIED" || message.includes("verify your email")) {
+              toast.error("Please verify your email before logging in.");
               navigate({ 
-                to: '/verify-email', 
+                to: "/verify-email", 
                 search: { email: payload.email, token: verificationToken }
               });
-            } else if (errorCode === 'RATE_LIMITED') {
-              toast.error('Too many login attempts. Please try again later.');
+            } else if (errorCode === "RATE_LIMITED") {
+              toast.error("Too many login attempts. Please try again later.");
             } else {
               toast.error(message);
             }
@@ -94,9 +150,28 @@ function Login() {
         }}
       >
         <div className="space-y-1.5">
-          <Label htmlFor="email">Email</Label>
-          <Input id="email" name="email" type="email" placeholder="you@company.com" autoComplete="email" required />
+          <div className="flex items-center justify-between">
+            <Label htmlFor="email">Email</Label>
+            <button
+              type="button"
+              onClick={fillDemoCredentials}
+              className="text-[11px] text-primary hover:underline cursor-pointer"
+            >
+              Fill demo credentials
+            </button>
+          </div>
+          <Input
+            id="email"
+            name="email"
+            type="email"
+            placeholder="you@company.com"
+            autoComplete="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+          />
         </div>
+
         <div className="space-y-1.5">
           <div className="flex items-center justify-between">
             <Label htmlFor="password">Password</Label>
@@ -104,9 +179,29 @@ function Login() {
               Forgot password?
             </Link>
           </div>
-          <Input id="password" name="password" type="password" autoComplete="current-password" required />
+          <div className="relative">
+            <Input
+              id="password"
+              name="password"
+              type={showPassword ? "text" : "password"}
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              className="pr-10"
+            />
+            <button
+              type="button"
+              onClick={() => setShowPassword(!showPassword)}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground cursor-pointer"
+              aria-label={showPassword ? "Hide password" : "Show password"}
+            >
+              {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
         </div>
-        <label className="flex items-center gap-2.5 text-xs text-muted-foreground">
+
+        <label className="flex items-center gap-2.5 text-xs text-muted-foreground cursor-pointer">
           <Checkbox
             checked={rememberMe}
             onCheckedChange={(v) => setRememberMe(v === true)}
@@ -114,8 +209,9 @@ function Login() {
           />
           Remember me for 30 days
         </label>
-        <Button type="submit" className="w-full" disabled={isSubmitting}>
-          {isSubmitting ? 'Signing in...' : 'Sign in'}
+
+        <Button type="submit" className="w-full" disabled={isSubmitting || isDemoSubmitting}>
+          {isSubmitting ? "Signing in..." : "Sign in"}
         </Button>
       </form>
 
@@ -129,8 +225,8 @@ function Login() {
           className="w-full"
           onClick={async () => {
             const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
-            if (!clientId || clientId === 'your-google-client-id-here' || clientId === 'demo-client-id') {
-              toast.error('Google OAuth is not configured. Please use email/password login.');
+            if (!clientId || clientId === "your-google-client-id-here" || clientId === "demo-client-id") {
+              toast.error("Google OAuth is not configured. Please use email/password or Demo Login.");
               return;
             }
             try {
@@ -147,8 +243,8 @@ function Login() {
           className="w-full"
           onClick={async () => {
             const clientId = import.meta.env.VITE_GITHUB_CLIENT_ID;
-            if (!clientId || clientId === 'your-github-client-id-here' || clientId === 'demo-client-id') {
-              toast.error('GitHub OAuth is not configured. Please use email/password login.');
+            if (!clientId || clientId === "your-github-client-id-here" || clientId === "demo-client-id") {
+              toast.error("GitHub OAuth is not configured. Please use email/password or Demo Login.");
               return;
             }
             try {
@@ -164,8 +260,8 @@ function Login() {
 
       <p className="mt-6 text-center text-xs text-muted-foreground">
         Prefer a tour first?{" "}
-        <Link to="/dashboard" className="text-primary hover:underline">
-          Explore the demo dashboard
+        <Link to="/office" className="text-primary hover:underline font-medium">
+          Explore the live AI Office
         </Link>
       </p>
     </AuthLayout>

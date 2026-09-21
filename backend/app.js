@@ -77,6 +77,10 @@ async function handleRequest({ request, config, store, ai, loginRateLimiter, reg
     return handleLogin({ request, config, store, loginRateLimiter, requestId });
   }
 
+  if (request.method === 'POST' && path === '/api/v1/auth/demo') {
+    return handleDemoLogin({ request, config, store, requestId });
+  }
+
   if (request.method === 'POST' && path === '/api/v1/auth/google/callback') {
     return handleGoogleCallback({ request, config, store, requestId });
   }
@@ -434,6 +438,32 @@ async function handleLogin({ request, config, store, loginRateLimiter, requestId
     expiresAt: session.expiresAt,
     rememberMe: session.rememberMe,
   });
+}
+
+async function handleDemoLogin({ config, store, requestId }) {
+  const email = 'demo@helix.app';
+  let user = store.getUserByEmail(email);
+  if (!user) {
+    user = store.createUser({
+      name: 'Demo Engineer',
+      email,
+      passwordHash: hashPassword('HelixDemo2026!', config.jwtSecret),
+    });
+  }
+  user.emailVerified = true;
+  user.emailVerificationToken = null;
+  const session = store.createSession(user.id, true);
+
+  return jsonResponse(200, {
+    token: session.token,
+    user: {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+    },
+    expiresAt: session.expiresAt,
+    rememberMe: true,
+  }, { 'x-correlation-id': requestId });
 }
 
 async function handleListProjects({ request, store, requestId }) {

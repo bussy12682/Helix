@@ -117,6 +117,13 @@ export async function loginUser(payload: { email: string; password: string; reme
   );
 }
 
+export async function demoLogin() {
+  return apiRequest<{ token: string; user: { id: string; name: string; email: string }; expiresAt: string; rememberMe: boolean }>(
+    '/api/v1/auth/demo',
+    { method: 'POST', body: JSON.stringify({}) },
+  );
+}
+
 export async function createProject(payload: { name: string; description?: string; keyFeatures?: string[]; techStack?: string[] }, token: string) {
   return apiRequest<{ id: string; name: string; description: string; keyFeatures: string[]; techStack: string[]; status: string; progress: number; ownerId: string; createdAt: string }>(
     '/api/v1/projects',

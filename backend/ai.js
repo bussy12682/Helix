@@ -106,8 +106,7 @@ function parseAnalysis(content, description) {
 export async function analyzeProjectBrief({ name, description, conversation = [] }, config) {
   const hasPlaceholderKey = /^(your[-_]|replace[-_]|sk[-_]?your)/i.test(config.aiApiKey ?? '');
   if (!config.aiProvider || !config.aiApiKey || hasPlaceholderKey || !config.aiBaseUrl || !config.aiModel) {
-    const keyName = getAiKeyName(config.aiProvider);
-    throw createAiError('AI_NOT_CONFIGURED', `Project analysis AI is not configured. Add ${keyName} to the backend environment.`);
+    return createFallbackAnalysis({ name, description });
   }
 
   const response = await fetch(`${config.aiBaseUrl}/chat/completions`, {

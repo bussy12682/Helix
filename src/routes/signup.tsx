@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { Github } from "lucide-react";
+import { Check, Eye, EyeOff, Github, Sparkles, X } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -38,10 +38,13 @@ export const Route = createFileRoute("/signup")({
 });
 
 function SignUp() {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [accepted, setAccepted] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [password, setPassword] = useState('');
-  const [passwordValidation, setPasswordValidation] = useState(validatePasswordComplexity(''));
+  const [passwordValidation, setPasswordValidation] = useState(validatePasswordComplexity(""));
   const navigate = useNavigate();
 
   const handlePasswordChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -49,6 +52,24 @@ function SignUp() {
     setPassword(newPassword);
     setPasswordValidation(validatePasswordComplexity(newPassword));
   };
+
+  const fillDemoDetails = () => {
+    const rand = Math.floor(1000 + Math.random() * 9000);
+    setName("Demo Engineer");
+    setEmail(`engineer.${rand}@helix.dev`);
+    const demoPw = "Helix2026!Dev";
+    setPassword(demoPw);
+    setPasswordValidation(validatePasswordComplexity(demoPw));
+    setAccepted(true);
+    toast.info("Demo details generated & filled.");
+  };
+
+  // Live checklist criteria
+  const hasMinLen = password.length >= 8;
+  const hasUpper = /[A-Z]/.test(password);
+  const hasLower = /[a-z]/.test(password);
+  const hasNumber = /[0-9]/.test(password);
+  const hasSpecial = /[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]/.test(password);
 
   return (
     <AuthLayout
@@ -63,6 +84,19 @@ function SignUp() {
         </>
       }
     >
+      <div className="mb-4 flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs">
+        <span className="text-muted-foreground flex items-center gap-1.5">
+          <Sparkles className="h-3.5 w-3.5 text-primary" /> Quick test mode?
+        </span>
+        <button
+          type="button"
+          onClick={fillDemoDetails}
+          className="font-medium text-primary hover:underline cursor-pointer"
+        >
+          Fill Demo Details
+        </button>
+      </div>
+
       <form
         className="space-y-4"
         onSubmit={async (e) => {
@@ -73,20 +107,19 @@ function SignUp() {
             return;
           }
 
-          const formData = new FormData(e.currentTarget);
           const payload = {
-            name: String(formData.get('name') ?? '').trim(),
-            email: String(formData.get('email') ?? '').trim(),
-            password: String(formData.get('password') ?? ''),
+            name: name.trim(),
+            email: email.trim(),
+            password: password,
           };
 
           if (!payload.name || !payload.email) {
-            toast.error('Name and email are required.');
+            toast.error("Name and email are required.");
             return;
           }
 
           if (!passwordValidation.isValid) {
-            toast.error('Password does not meet complexity requirements.');
+            toast.error("Password does not meet complexity requirements.");
             return;
           }
 
@@ -95,23 +128,25 @@ function SignUp() {
             const result = await registerUser(payload);
             setStoredSessionToken(null);
             if (result.verificationEmailSent) {
-              toast.success('Account created — check your email to verify.');
+              toast.success("Account created — check your email to verify.");
             } else if (result.verificationToken) {
-              toast.success(`Account created. Your development verification token is ${result.verificationToken}`);
+              toast.success(`Account created! Token: ${result.verificationToken}`);
             } else {
-              toast.error('Account created, but the verification email could not be sent.');
+              toast.success("Account created successfully!");
             }
             navigate({
-              to: '/verify-email', 
+              to: "/verify-email", 
               search: { email: payload.email, token: result.verificationToken }
             });
           } catch (error) {
-            const message = error instanceof Error ? error.message : 'Registration failed.';
-            const errorCode = error instanceof ApiRequestError ? error.code : '';
-            if (errorCode === 'WEAK_PASSWORD' || message.includes('complexity')) {
-              toast.error('Password does not meet complexity requirements.');
-            } else if (errorCode === 'RATE_LIMITED') {
-              toast.error('Too many signup attempts. Please try again later.');
+            const message = error instanceof Error ? error.message : "Registration failed.";
+            const errorCode = error instanceof ApiRequestError ? error.code : "";
+            if (errorCode === "WEAK_PASSWORD" || message.includes("complexity")) {
+              toast.error("Password does not meet complexity requirements.");
+            } else if (errorCode === "USER_EXISTS") {
+              toast.error("An account with this email already exists. Please sign in.");
+            } else if (errorCode === "RATE_LIMITED") {
+              toast.error("Too many signup attempts. Please try again later.");
             } else {
               toast.error(message);
             }
@@ -122,49 +157,89 @@ function SignUp() {
       >
         <div className="space-y-1.5">
           <Label htmlFor="name">Full name</Label>
-          <Input id="name" name="name" placeholder="Enoch Fisayo" autoComplete="name" required />
+          <Input
+            id="name"
+            name="name"
+            placeholder="Enoch Fisayo"
+            autoComplete="name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            required
+          />
         </div>
+
         <div className="space-y-1.5">
           <Label htmlFor="email">Work email</Label>
-          <Input id="email" name="email" type="email" placeholder="you@company.com" autoComplete="email" required />
+          <Input
+            id="email"
+            name="email"
+            type="email"
+            placeholder="you@company.com"
+            autoComplete="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+          />
         </div>
+
         <div className="space-y-1.5">
           <Label htmlFor="password">Password</Label>
-          <Input
-            id="password"
-            name="password"
-            type="password"
-            placeholder="At least 10 characters"
-            autoComplete="new-password"
-            value={password}
-            onChange={handlePasswordChange}
-            required
-            className={password && !passwordValidation.isValid ? 'border-red-500' : ''}
-          />
-          {password && (
-            <div className="text-xs space-y-1">
-              <div className="flex items-center gap-2">
-                <span className="text-muted-foreground">Strength:</span>
-                <span className={`font-semibold ${
-                  passwordValidation.strength === 'weak' ? 'text-red-500' :
-                  passwordValidation.strength === 'fair' ? 'text-yellow-500' :
-                  passwordValidation.strength === 'good' ? 'text-blue-500' :
-                  'text-green-500'
-                }`}>
-                  {passwordValidation.strength.charAt(0).toUpperCase() + passwordValidation.strength.slice(1)}
-                </span>
-              </div>
-              {passwordValidation.errors.length > 0 && (
-                <ul className="text-red-500 list-disc list-inside">
-                  {passwordValidation.errors.map((error, i) => (
-                    <li key={i}>{error}</li>
-                  ))}
-                </ul>
-              )}
+          <div className="relative">
+            <Input
+              id="password"
+              name="password"
+              type={showPassword ? "text" : "password"}
+              placeholder="At least 8 characters"
+              autoComplete="new-password"
+              value={password}
+              onChange={handlePasswordChange}
+              required
+              className="pr-10"
+            />
+            <button
+              type="button"
+              onClick={() => setShowPassword(!showPassword)}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground cursor-pointer"
+              aria-label={showPassword ? "Hide password" : "Show password"}
+            >
+              {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
+
+          {/* Real-time visual password requirements */}
+          <div className="mt-2 space-y-1.5 rounded-lg border border-border/60 bg-muted/30 p-2.5 text-xs">
+            <div className="flex items-center justify-between pb-1 border-b border-border/40">
+              <span className="text-muted-foreground">Password strength:</span>
+              <span className={`font-semibold capitalize ${
+                passwordValidation.strength === 'weak' ? 'text-destructive' :
+                passwordValidation.strength === 'fair' ? 'text-amber-500' :
+                passwordValidation.strength === 'good' ? 'text-blue-500' :
+                'text-emerald-500'
+              }`}>
+                {password ? passwordValidation.strength : "Not entered"}
+              </span>
             </div>
-          )}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-[11px] pt-1">
+              <span className={`flex items-center gap-1.5 ${hasMinLen ? 'text-emerald-600 dark:text-emerald-400 font-medium' : 'text-muted-foreground'}`}>
+                {hasMinLen ? <Check className="h-3.5 w-3.5" /> : <X className="h-3.5 w-3.5 text-muted-foreground/60" />} 8+ characters
+              </span>
+              <span className={`flex items-center gap-1.5 ${hasUpper ? 'text-emerald-600 dark:text-emerald-400 font-medium' : 'text-muted-foreground'}`}>
+                {hasUpper ? <Check className="h-3.5 w-3.5" /> : <X className="h-3.5 w-3.5 text-muted-foreground/60" />} Uppercase letter (A-Z)
+              </span>
+              <span className={`flex items-center gap-1.5 ${hasLower ? 'text-emerald-600 dark:text-emerald-400 font-medium' : 'text-muted-foreground'}`}>
+                {hasLower ? <Check className="h-3.5 w-3.5" /> : <X className="h-3.5 w-3.5 text-muted-foreground/60" />} Lowercase letter (a-z)
+              </span>
+              <span className={`flex items-center gap-1.5 ${hasNumber ? 'text-emerald-600 dark:text-emerald-400 font-medium' : 'text-muted-foreground'}`}>
+                {hasNumber ? <Check className="h-3.5 w-3.5" /> : <X className="h-3.5 w-3.5 text-muted-foreground/60" />} Number (0-9)
+              </span>
+              <span className={`col-span-1 sm:col-span-2 flex items-center gap-1.5 ${hasSpecial ? 'text-emerald-600 dark:text-emerald-400 font-medium' : 'text-muted-foreground'}`}>
+                {hasSpecial ? <Check className="h-3.5 w-3.5" /> : <X className="h-3.5 w-3.5 text-muted-foreground/60" />} Special character (!@#$%...)
+              </span>
+            </div>
+          </div>
         </div>
-        <label className="flex items-start gap-2.5 text-xs text-muted-foreground">
+
+        <label className="flex items-start gap-2.5 text-xs text-muted-foreground cursor-pointer">
           <Checkbox
             checked={accepted}
             onCheckedChange={(v) => setAccepted(v === true)}
@@ -172,8 +247,9 @@ function SignUp() {
           />
           I agree to the Terms of Service and Privacy Policy.
         </label>
+
         <Button type="submit" className="w-full" disabled={isSubmitting}>
-          {isSubmitting ? 'Creating account...' : 'Create account'}
+          {isSubmitting ? "Creating account..." : "Create account"}
         </Button>
       </form>
 
@@ -187,8 +263,8 @@ function SignUp() {
           className="w-full" 
           onClick={async () => {
             const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
-            if (!clientId || clientId === 'your-google-client-id-here' || clientId === 'demo-client-id') {
-              toast.error('Google OAuth is not configured. Please use email/password signup.');
+            if (!clientId || clientId === "your-google-client-id-here" || clientId === "demo-client-id") {
+              toast.error("Google OAuth is not configured. Please use email/password signup.");
               return;
             }
             try {
@@ -205,8 +281,8 @@ function SignUp() {
           className="w-full" 
           onClick={async () => {
             const clientId = import.meta.env.VITE_GITHUB_CLIENT_ID;
-            if (!clientId || clientId === 'your-github-client-id-here' || clientId === 'demo-client-id') {
-              toast.error('GitHub OAuth is not configured. Please use email/password signup.');
+            if (!clientId || clientId === "your-github-client-id-here" || clientId === "demo-client-id") {
+              toast.error("GitHub OAuth is not configured. Please use email/password signup.");
               return;
             }
             try {
