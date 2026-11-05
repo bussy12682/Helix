@@ -19,7 +19,7 @@
 - **Session tokens in `localStorage`** and passed as a query parameter for EventSource; consider httpOnly cookies.
 - **Repo-wide Prettier errors** remain in files not touched by this work (`npm run lint`: formatting only); run `npm run format` in a dedicated PR.
 - Agent artifacts are generated specifications/code stored in a virtual workspace; they are not compiled, executed or deployed.
-- Frontend has no automated component tests; UI was verified manually against the running backend.
+- Frontend has no automated component tests and has not yet been browser-tested end to end; backend SSE was verified against a real HTTP server.
 
 ## 3. Test results
 
