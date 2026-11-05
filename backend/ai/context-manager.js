@@ -62,7 +62,16 @@ export class ContextManager {
    * Initializes or fetches an isolated project workspace context.
    */
   getOrCreateWorkspace(projectId, initialData = {}) {
-    if (!this.projectWorkspaces.has(projectId)) {
+    const hasBrief = Boolean(initialData.name);
+    const existing = this.projectWorkspaces.get(projectId);
+    if (existing && hasBrief && existing.name === "Untitled Project") {
+      // Replace a placeholder created by an earlier read with the real project brief.
+      for (const key of ["name", "description", "keyFeatures", "techStack"]) {
+        if (initialData[key] !== undefined) existing[key] = initialData[key];
+      }
+      this.notifyChange(projectId);
+    }
+    if (!existing) {
       const created = {
         projectId,
         name: initialData.name || "Untitled Project",
@@ -77,7 +86,8 @@ export class ContextManager {
       // Late writes from aborted tasks of a deleted project go to a detached workspace.
       if (this.removedProjects.has(projectId)) return created;
       this.projectWorkspaces.set(projectId, created);
-      this.notifyChange(projectId);
+      // Only persist workspaces created with a real brief; reads must not save placeholders.
+      if (hasBrief) this.notifyChange(projectId);
     }
     return this.projectWorkspaces.get(projectId);
   }
@@ -266,6 +276,14 @@ export class ContextManager {
    * Resets workspace memory when a project is deleted or re-initialized.
    */
   clearWorkspace(projectId) {
+    this.projectWorkspaces.delete(projectId);
+    this.removedProjects.delete(projectId);
+  }
+
+  /**
+   * Permanently drops a deleted project's workspace; late writes from its aborted runs are discarded.
+   */
+  deleteProject(projectId) {
     this.projectWorkspaces.delete(projectId);
     this.removedProjects.add(projectId);
   }

@@ -286,7 +286,7 @@ export class Orchestrator {
         this.workflows.delete(id);
       }
     }
-    this.contextManager.clearWorkspace(projectId);
+    this.contextManager.deleteProject(projectId);
   }
 
   /**

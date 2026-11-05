@@ -187,3 +187,27 @@ test("retry after cancelling at an approval gate restores the checkpoint instead
   const db = wf.tasks.find((t) => t.agent === AGENT_ROLES.DATABASE_ENGINEER);
   assert.equal(db.status, "queued");
 });
+
+test("clearWorkspace resets without tombstoning; reads never persist placeholder briefs", () => {
+  const ai = createAiSubsystem({ mockMode: true });
+  const cm = ai.contextManager;
+  const writes = [];
+  cm.setPersistence((ws) => writes.push(structuredClone(ws)));
+
+  cm.getArtifacts("p_read");
+  assert.equal(writes.length, 0, "a read must not persist an Untitled Project workspace");
+  cm.getOrCreateWorkspace("p_read", { name: "Inventory", description: "Track stock" });
+  assert.equal(cm.getOrCreateWorkspace("p_read").name, "Inventory");
+  assert.equal(writes.at(-1).description, "Track stock");
+
+  cm.clearWorkspace("p1");
+  cm.getOrCreateWorkspace("p1", { name: "Again" });
+  cm.saveArtifact("p1", {
+    name: "PRD",
+    type: "doc",
+    path: "docs/prd.md",
+    content: "x",
+    createdBy: "pm",
+  });
+  assert.equal(cm.getArtifacts("p1").length, 1);
+});
