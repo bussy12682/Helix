@@ -224,7 +224,7 @@ function Login() {
           variant="outline" 
           className="w-full"
           onClick={async () => {
-            const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
+            const clientId = import.meta.env['VITE_GOOGLE_CLIENT_ID'];
             if (!clientId || clientId === "your-google-client-id-here" || clientId === "demo-client-id") {
               toast.error("Google OAuth is not configured. Please use email/password or Demo Login.");
               return;
@@ -242,7 +242,7 @@ function Login() {
           variant="outline" 
           className="w-full"
           onClick={async () => {
-            const clientId = import.meta.env.VITE_GITHUB_CLIENT_ID;
+            const clientId = import.meta.env['VITE_GITHUB_CLIENT_ID'];
             if (!clientId || clientId === "your-github-client-id-here" || clientId === "demo-client-id") {
               toast.error("GitHub OAuth is not configured. Please use email/password or Demo Login.");
               return;

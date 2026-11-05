@@ -146,6 +146,7 @@ function NewProject() {
           let interimText = '';
           for (let index = event.resultIndex; index < event.results.length; index += 1) {
             const result = event.results[index];
+            if (!result?.[0]) continue;
             if (result.isFinal) finalText += `${result[0].transcript} `;
             else interimText += `${result[0].transcript} `;
           }

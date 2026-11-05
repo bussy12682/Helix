@@ -98,6 +98,7 @@ function Summary() {
   if (!analysis) return null;
 
   async function confirmProject() {
+    if (!analysis) return;
     const token = getStoredSessionToken();
     if (!token) {
       navigate({ to: '/login' });
@@ -114,8 +115,12 @@ function Summary() {
       }, token);
       sessionStorage.removeItem('helix_project_analysis');
       sessionStorage.setItem('helix_active_project_id', created.id);
-      await startProjectWorkflow(created.id, token).catch(() => null);
-      toast.success('Project created. Your HELIX AI engineering team is active.');
+      try {
+        await startProjectWorkflow(created.id, token);
+        toast.success('Project created. Your HELIX AI engineering team is active.');
+      } catch (workflowError) {
+        toast.error(`Project created, but the AI workflow could not start: ${workflowError instanceof Error ? workflowError.message : 'unknown error'}`);
+      }
       navigate({ to: '/office' });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Could not create project.');

@@ -223,7 +223,7 @@ const faqs = [
 ];
 
 function Landing() {
-  const [selectedAgent, setSelectedAgent] = useState(agents[0]);
+  const [selectedAgent, setSelectedAgent] = useState(agents[0]!);
   const [openFaq, setOpenFaq] = useState<number | null>(0);
   const [isDemoLoading, setIsDemoLoading] = useState(false);
   const navigate = useNavigate();
@@ -807,7 +807,7 @@ function Landing() {
                 </ul>
               </div>
               <Button asChild className="w-full mt-8" variant="outline">
-                <Link to="/billing">Contact Sales</Link>
+                <Link to="/signup">Get Started</Link>
               </Button>
             </div>
           </div>

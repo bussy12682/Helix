@@ -1,20 +1,20 @@
 export type ApiError = {
   code: string;
   message: string;
-  requestId?: string;
-  details?: string[];
-  verificationToken?: string;
+  requestId?: string | undefined;
+  details?: string[] | undefined;
+  verificationToken?: string | undefined;
 };
 
 export class ApiRequestError extends Error {
   code: string;
-  details?: string[];
-  requestId?: string;
-  verificationToken?: string;
+  details?: string[] | undefined;
+  requestId?: string | undefined;
+  verificationToken?: string | undefined;
 
   constructor(error: ApiError) {
     super(error.message);
-    this.name = 'ApiRequestError';
+    this.name = "ApiRequestError";
     this.code = error.code;
     this.details = error.details;
     this.requestId = error.requestId;
@@ -27,15 +27,15 @@ export type ApiResponse<T> = {
   error?: ApiError;
 };
 
-const STORAGE_KEY = 'helix_session';
-const DEFAULT_BASE_URL = 'http://localhost:3001';
+const STORAGE_KEY = "helix_session";
+const DEFAULT_BASE_URL = "http://localhost:3001";
 
 function getBaseUrl() {
-  return (import.meta.env.VITE_API_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/$/, '');
+  return (import.meta.env["VITE_API_BASE_URL"] ?? DEFAULT_BASE_URL).replace(/\/$/, "");
 }
 
 export function getStoredSessionToken() {
-  if (typeof window === 'undefined') return null;
+  if (typeof window === "undefined") return null;
 
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
@@ -48,7 +48,7 @@ export function getStoredSessionToken() {
 }
 
 export function setStoredSessionToken(token: string | null) {
-  if (typeof window === 'undefined') return;
+  if (typeof window === "undefined") return;
 
   if (!token) {
     window.localStorage.removeItem(STORAGE_KEY);
@@ -60,11 +60,11 @@ export function setStoredSessionToken(token: string | null) {
 
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const url = `${getBaseUrl()}${path}`;
-  const isFormData = typeof FormData !== 'undefined' && init.body instanceof FormData;
+  const isFormData = typeof FormData !== "undefined" && init.body instanceof FormData;
   const response = await fetch(url, {
     ...init,
     headers: {
-      ...(isFormData ? {} : { 'content-type': 'application/json' }),
+      ...(isFormData ? {} : { "content-type": "application/json" }),
       ...(init.headers ?? {}),
     },
   });
@@ -73,12 +73,12 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
 
   if (!response.ok) {
     const error = body?.error ?? {
-      code: 'REQUEST_FAILED',
-      message: 'Request failed',
+      code: "REQUEST_FAILED",
+      message: "Request failed",
     };
     throw new ApiRequestError({
-      code: error.code ?? 'REQUEST_FAILED',
-      message: error.message ?? 'Request failed',
+      code: error.code ?? "REQUEST_FAILED",
+      message: error.message ?? "Request failed",
       requestId: error.requestId,
       details: error.details,
       verificationToken: error.verificationToken,
@@ -89,10 +89,13 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
 }
 
 export async function getHealth() {
-  return apiRequest<{ ok: boolean; service: string; status: string; environment: string; timestamp: string }>(
-    '/api/v1/health',
-    { method: 'GET' },
-  );
+  return apiRequest<{
+    ok: boolean;
+    service: string;
+    status: string;
+    environment: string;
+    timestamp: string;
+  }>("/api/v1/health", { method: "GET" });
 }
 
 export async function registerUser(payload: { name: string; email: string; password: string }) {
@@ -104,37 +107,52 @@ export async function registerUser(payload: { name: string; email: string; passw
     verificationEmailSent: boolean;
     verificationToken?: string;
     message: string;
-  }>(
-    '/api/v1/auth/register',
-    { method: 'POST', body: JSON.stringify(payload) },
-  );
+  }>("/api/v1/auth/register", { method: "POST", body: JSON.stringify(payload) });
 }
 
-export async function loginUser(payload: { email: string; password: string; rememberMe?: boolean }) {
-  return apiRequest<{ token: string; user: { id: string; name: string; email: string }; expiresAt: string; rememberMe: boolean }>(
-    '/api/v1/auth/login',
-    { method: 'POST', body: JSON.stringify(payload) },
-  );
+export async function loginUser(payload: {
+  email: string;
+  password: string;
+  rememberMe?: boolean;
+}) {
+  return apiRequest<{
+    token: string;
+    user: { id: string; name: string; email: string };
+    expiresAt: string;
+    rememberMe: boolean;
+  }>("/api/v1/auth/login", { method: "POST", body: JSON.stringify(payload) });
 }
 
 export async function demoLogin() {
-  return apiRequest<{ token: string; user: { id: string; name: string; email: string }; expiresAt: string; rememberMe: boolean }>(
-    '/api/v1/auth/demo',
-    { method: 'POST', body: JSON.stringify({}) },
-  );
+  return apiRequest<{
+    token: string;
+    user: { id: string; name: string; email: string };
+    expiresAt: string;
+    rememberMe: boolean;
+  }>("/api/v1/auth/demo", { method: "POST", body: JSON.stringify({}) });
 }
 
-export async function createProject(payload: { name: string; description?: string; keyFeatures?: string[]; techStack?: string[] }, token: string) {
-  return apiRequest<{ id: string; name: string; description: string; keyFeatures: string[]; techStack: string[]; status: string; progress: number; ownerId: string; createdAt: string }>(
-    '/api/v1/projects',
-    {
-      method: 'POST',
-      body: JSON.stringify(payload),
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
+export async function createProject(
+  payload: { name: string; description?: string; keyFeatures?: string[]; techStack?: string[] },
+  token: string,
+) {
+  return apiRequest<{
+    id: string;
+    name: string;
+    description: string;
+    keyFeatures: string[];
+    techStack: string[];
+    status: string;
+    progress: number;
+    ownerId: string;
+    createdAt: string;
+  }>("/api/v1/projects", {
+    method: "POST",
+    body: JSON.stringify(payload),
+    headers: {
+      Authorization: `Bearer ${token}`,
     },
-  );
+  });
 }
 
 export type ProjectAnalysis = {
@@ -144,24 +162,30 @@ export type ProjectAnalysis = {
   techStack: string[];
 };
 
-export async function analyzeProject(payload: {
-  name: string;
-  description: string;
-  conversation?: Array<{ role: 'user' | 'assistant'; content: string }>;
-}, token: string) {
-  return apiRequest<ProjectAnalysis>('/api/v1/projects/analyze', {
-    method: 'POST',
+export async function analyzeProject(
+  payload: {
+    name: string;
+    description: string;
+    conversation?: Array<{ role: "user" | "assistant"; content: string }>;
+  },
+  token: string,
+) {
+  return apiRequest<ProjectAnalysis>("/api/v1/projects/analyze", {
+    method: "POST",
     body: JSON.stringify(payload),
     headers: { Authorization: `Bearer ${token}` },
   });
 }
 
-export async function sendVoiceTurn(payload: {
-  name: string;
-  messages: Array<{ role: 'user' | 'assistant'; content: string }>;
-}, token: string) {
-  return apiRequest<{ reply: string }>('/api/v1/voice/turn', {
-    method: 'POST',
+export async function sendVoiceTurn(
+  payload: {
+    name: string;
+    messages: Array<{ role: "user" | "assistant"; content: string }>;
+  },
+  token: string,
+) {
+  return apiRequest<{ reply: string }>("/api/v1/voice/turn", {
+    method: "POST",
     body: JSON.stringify(payload),
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -169,10 +193,10 @@ export async function sendVoiceTurn(payload: {
 
 export async function transcribeVoiceNote(file: Blob, token: string) {
   const formData = new FormData();
-  formData.append('audio', file, 'voice-note.webm');
+  formData.append("audio", file, "voice-note.webm");
 
-  return apiRequest<{ transcript: string }>('/api/v1/voice/transcribe', {
-    method: 'POST',
+  return apiRequest<{ transcript: string }>("/api/v1/voice/transcribe", {
+    method: "POST",
     body: formData,
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -180,32 +204,42 @@ export async function transcribeVoiceNote(file: Blob, token: string) {
 
 export async function extractProjectDocument(file: File, token: string) {
   const formData = new FormData();
-  formData.append('file', file);
+  formData.append("file", file);
 
-  return apiRequest<{ fileName: string; description: string; truncated: boolean }>('/api/v1/projects/extract-document', {
-    method: 'POST',
-    body: formData,
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  return apiRequest<{ fileName: string; description: string; truncated: boolean }>(
+    "/api/v1/projects/extract-document",
+    {
+      method: "POST",
+      body: formData,
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
 }
 
 export async function deleteProject(projectId: string, token: string) {
   return apiRequest<{ message: string; id: string }>(`/api/v1/projects/${projectId}`, {
-    method: 'DELETE',
+    method: "DELETE",
     headers: { Authorization: `Bearer ${token}` },
   });
 }
 
 export async function listProjects(token: string) {
-  return apiRequest<Array<{ id: string; name: string; description: string; status: string; progress: number; ownerId: string; createdAt: string }>>(
-    '/api/v1/projects',
-    {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
+  return apiRequest<
+    Array<{
+      id: string;
+      name: string;
+      description: string;
+      status: string;
+      progress: number;
+      ownerId: string;
+      createdAt: string;
+    }>
+  >("/api/v1/projects", {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${token}`,
     },
-  );
+  });
 }
 
 export async function getDashboard(token: string) {
@@ -226,8 +260,8 @@ export async function getDashboard(token: string) {
       completedProjects: number;
       deployments: number;
     };
-  }>('/api/v1/dashboard', {
-    method: 'GET',
+  }>("/api/v1/dashboard", {
+    method: "GET",
     headers: { Authorization: `Bearer ${token}` },
   });
 }
@@ -235,104 +269,109 @@ export async function getDashboard(token: string) {
 export async function initiateGoogleOAuth() {
   const codeVerifier = generateRandomString(128);
   const codeChallenge = await generateCodeChallenge(codeVerifier);
-  
-  window.localStorage.setItem('google_pkce_verifier', codeVerifier);
-  
+
+  window.localStorage.setItem("google_pkce_verifier", codeVerifier);
+  const state = generateRandomString(32);
+  window.localStorage.setItem("google_oauth_state", state);
+
   const params = new URLSearchParams({
-    client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID || 'demo-client-id',
+    client_id: import.meta.env["VITE_GOOGLE_CLIENT_ID"] || "demo-client-id",
     redirect_uri: `${window.location.origin}/auth/google/callback`,
-    response_type: 'code',
-    scope: 'openid profile email',
-    state: generateRandomString(32),
+    response_type: "code",
+    scope: "openid profile email",
+    state,
+    code_challenge: codeChallenge,
+    code_challenge_method: "S256",
   });
-  
+
   window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
 }
 
 export async function initiateGitHubOAuth() {
   const state = generateRandomString(32);
-  window.localStorage.setItem('github_oauth_state', state);
-  
+  window.localStorage.setItem("github_oauth_state", state);
+
   const params = new URLSearchParams({
-    client_id: import.meta.env.VITE_GITHUB_CLIENT_ID || 'demo-client-id',
+    client_id: import.meta.env["VITE_GITHUB_CLIENT_ID"] || "demo-client-id",
     redirect_uri: `${window.location.origin}/auth/github/callback`,
-    scope: 'user:email',
+    scope: "user:email",
     state,
   });
-  
+
   window.location.href = `https://github.com/login/oauth/authorize?${params}`;
 }
 
-export async function completeGoogleOAuth(code: string) {
-  const codeVerifier = window.localStorage.getItem('google_pkce_verifier');
-  window.localStorage.removeItem('google_pkce_verifier');
-  
-  return apiRequest<{ token: string; user: { id: string; name: string; email: string }; expiresAt: string }>(
-    '/api/v1/auth/google/callback',
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        code,
-        codeVerifier,
-        redirectUri: `${window.location.origin}/auth/google/callback`,
-      }),
-    },
-  );
+export async function completeGoogleOAuth(code: string, state?: string | null) {
+  const codeVerifier = window.localStorage.getItem("google_pkce_verifier");
+  const savedState = window.localStorage.getItem("google_oauth_state");
+  window.localStorage.removeItem("google_pkce_verifier");
+  window.localStorage.removeItem("google_oauth_state");
+  if (!savedState || savedState !== state) {
+    throw new Error("OAuth state mismatch");
+  }
+
+  return apiRequest<{
+    token: string;
+    user: { id: string; name: string; email: string };
+    expiresAt: string;
+  }>("/api/v1/auth/google/callback", {
+    method: "POST",
+    body: JSON.stringify({
+      code,
+      codeVerifier,
+      redirectUri: `${window.location.origin}/auth/google/callback`,
+    }),
+  });
 }
 
 export async function completeGitHubOAuth(code: string, state: string) {
-  const savedState = window.localStorage.getItem('github_oauth_state');
-  window.localStorage.removeItem('github_oauth_state');
-  
+  const savedState = window.localStorage.getItem("github_oauth_state");
+  window.localStorage.removeItem("github_oauth_state");
+
   if (savedState !== state) {
-    throw new Error('OAuth state mismatch');
+    throw new Error("OAuth state mismatch");
   }
-  
-  return apiRequest<{ token: string; user: { id: string; name: string; email: string }; expiresAt: string }>(
-    '/api/v1/auth/github/callback',
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        code,
-        redirectUri: `${window.location.origin}/auth/github/callback`,
-      }),
-    },
-  );
+
+  return apiRequest<{
+    token: string;
+    user: { id: string; name: string; email: string };
+    expiresAt: string;
+  }>("/api/v1/auth/github/callback", {
+    method: "POST",
+    body: JSON.stringify({
+      code,
+      redirectUri: `${window.location.origin}/auth/github/callback`,
+    }),
+  });
 }
 
 export async function requestPasswordReset(email: string) {
-  return apiRequest<{ message: string }>(
-    '/api/v1/auth/password-reset/request',
-    {
-      method: 'POST',
-      body: JSON.stringify({ email }),
-    },
-  );
+  return apiRequest<{ message: string }>("/api/v1/auth/password-reset/request", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
 }
 
 export async function resetPassword(token: string, password: string) {
-  return apiRequest<{ message: string }>(
-    '/api/v1/auth/password-reset/complete',
-    {
-      method: 'POST',
-      body: JSON.stringify({ token, password }),
-    },
-  );
+  return apiRequest<{ message: string }>("/api/v1/auth/password-reset/complete", {
+    method: "POST",
+    body: JSON.stringify({ token, password }),
+  });
 }
 
 export async function verifyEmail(token: string) {
-  return apiRequest<{ message: string; user: { id: string; name: string; email: string; emailVerified: boolean } }>(
-    '/api/v1/auth/verify-email',
-    {
-      method: 'POST',
-      body: JSON.stringify({ token }),
-    },
-  );
+  return apiRequest<{
+    message: string;
+    user: { id: string; name: string; email: string; emailVerified: boolean };
+  }>("/api/v1/auth/verify-email", {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
 }
 
 function generateRandomString(length: number): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
-  let result = '';
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+  let result = "";
   for (let i = 0; i < length; i++) {
     result += chars.charAt(Math.floor(Math.random() * chars.length));
   }
@@ -342,15 +381,15 @@ function generateRandomString(length: number): string {
 async function generateCodeChallenge(verifier: string): Promise<string> {
   const encoder = new TextEncoder();
   const data = encoder.encode(verifier);
-  const digest = await crypto.subtle.digest('SHA-256', data);
+  const digest = await crypto.subtle.digest("SHA-256", data);
   return btoa(String.fromCharCode.apply(null, Array.from(new Uint8Array(digest))))
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=/g, '');
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=/g, "");
 }
 
 // Password validation utilities
-export type PasswordStrength = 'weak' | 'fair' | 'good' | 'strong';
+export type PasswordStrength = "weak" | "fair" | "good" | "strong";
 
 export interface PasswordValidation {
   isValid: boolean;
@@ -362,23 +401,23 @@ export function validatePasswordComplexity(password: string): PasswordValidation
   const errors: string[] = [];
 
   if (!password || password.length < 8) {
-    errors.push('Password must be at least 8 characters long');
+    errors.push("Password must be at least 8 characters long");
   }
 
   if (!/[A-Z]/.test(password)) {
-    errors.push('Password must contain at least one uppercase letter');
+    errors.push("Password must contain at least one uppercase letter");
   }
 
   if (!/[a-z]/.test(password)) {
-    errors.push('Password must contain at least one lowercase letter');
+    errors.push("Password must contain at least one lowercase letter");
   }
 
   if (!/[0-9]/.test(password)) {
-    errors.push('Password must contain at least one number');
+    errors.push("Password must contain at least one number");
   }
 
-  if (!/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password)) {
-    errors.push('Password must contain at least one special character (!@#$%^&*...)');
+  if (!/[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]/.test(password)) {
+    errors.push("Password must contain at least one special character (!@#$%^&*...)");
   }
 
   return {
@@ -397,13 +436,16 @@ function calculatePasswordStrength(password: string): PasswordStrength {
   if (/[a-z]/.test(password)) strength++;
   if (/[A-Z]/.test(password)) strength++;
   if (/[0-9]/.test(password)) strength++;
-  if (/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password)) strength++;
+  if (/[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]/.test(password)) strength++;
 
-  if (strength <= 2) return 'weak';
-  if (strength <= 4) return 'fair';
-  if (strength <= 5) return 'good';
-  return 'strong';
+  if (strength <= 2) return "weak";
+  if (strength <= 4) return "fair";
+  if (strength <= 5) return "good";
+  return "strong";
 }
+
+export type WorkflowStatus =
+  "pending" | "running" | "awaiting_approval" | "completed" | "failed" | "cancelled";
 
 export type OfficeAgent = {
   id: string;
@@ -413,26 +455,50 @@ export type OfficeAgent = {
   initials: string;
   description: string;
   category: string;
-  status: 'working' | 'queued' | 'done' | 'idle' | 'awaiting_approval' | 'failed';
+  status: "working" | "queued" | "done" | "idle" | "awaiting_approval" | "failed" | "cancelled";
   progress: number;
   currentTask: string;
+  provider?: string;
+  model?: string;
+  simulated?: boolean;
 };
+
+export type AgentRisk = { description: string; severity: "low" | "medium" | "high" | "critical" };
 
 export type OfficeTask = {
   id: string;
   agent: string;
   role: string;
   task: string;
-  status: 'queued' | 'running' | 'completed' | 'awaiting_approval' | 'needs_revision' | 'failed';
+  status:
+    | "queued"
+    | "running"
+    | "completed"
+    | "awaiting_approval"
+    | "needs_revision"
+    | "failed"
+    | "cancelled";
   progress: number;
   summary: string | null;
   requiresApproval: string | null;
+  approvalGranted?: boolean;
+  error?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  simulated?: boolean;
+  attempts?: number;
+  durationMs?: number | null;
+  risks?: AgentRisk[];
+  reviewFindings?: string[];
 };
 
 export type OfficeFloorState = {
   hasActiveWorkflow: boolean;
   workflowId?: string;
-  workflowStatus: 'pending' | 'running' | 'awaiting_approval' | 'completed' | 'failed' | 'idle';
+  workflowStatus: WorkflowStatus | "idle";
+  workflowError?: string | null;
+  progress?: number;
+  reviewLoopCount?: number;
   currentCheckpoint: {
     taskId: string;
     checkpointType: string;
@@ -444,28 +510,73 @@ export type OfficeFloorState = {
   tasks: OfficeTask[];
 };
 
-export async function startProjectWorkflow(projectId: string, token: string) {
-  return apiRequest<any>(`/api/v1/projects/${projectId}/workflows`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
+export type Workflow = {
+  id: string;
+  projectId: string;
+  status: WorkflowStatus;
+  progress: number;
+  error: string | null;
+  currentCheckpoint: OfficeFloorState["currentCheckpoint"];
+};
+
+export type Artifact = {
+  name: string;
+  type: string;
+  path: string;
+  content: string;
+  version: number;
+  createdBy?: string;
+  updatedAt?: string;
+};
+
+export type Project = {
+  id: string;
+  name: string;
+  description: string;
+  keyFeatures: string[];
+  techStack: string[];
+  status: string;
+  progress: number;
+  ownerId: string;
+  createdAt: string;
+  workflowStatus?: WorkflowStatus;
+};
+
+export type CurrentUser = {
+  id: string;
+  name: string;
+  email: string;
+  emailVerified: boolean;
+  authProvider: string;
+  createdAt: string;
+};
+
+const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}` });
+
+export async function startProjectWorkflow(
+  projectId: string,
+  token: string,
+  options: { restart?: boolean } = {},
+) {
+  return apiRequest<Workflow>(`/api/v1/projects/${projectId}/workflows`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify(options),
   });
 }
 
 export async function getProjectOffice(projectId: string, token: string) {
   return apiRequest<OfficeFloorState>(`/api/v1/projects/${projectId}/office`, {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${token}` },
+    method: "GET",
+    headers: authHeaders(token),
   });
 }
 
 export async function getProjectArtifacts(projectId: string, token: string) {
-  return apiRequest<{ artifacts: Array<{ name: string; type: string; path: string; content: string; version: number }> }>(
-    `/api/v1/projects/${projectId}/artifacts`,
-    {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
-    },
-  );
+  return apiRequest<{ artifacts: Artifact[] }>(`/api/v1/projects/${projectId}/artifacts`, {
+    method: "GET",
+    headers: authHeaders(token),
+  });
 }
 
 export async function approveWorkflowCheckpoint(
@@ -474,18 +585,146 @@ export async function approveWorkflowCheckpoint(
   approved: boolean,
   comments: string,
   token: string,
+  options: { revise?: boolean } = {},
 ) {
-  return apiRequest<any>(`/api/v1/workflows/${workflowId}/approve`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ checkpointType, approved, comments }),
+  return apiRequest<Workflow>(`/api/v1/workflows/${workflowId}/approve`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({ checkpointType, approved, comments, revise: options.revise ?? false }),
   });
 }
+
+export async function retryWorkflow(workflowId: string, token: string) {
+  return apiRequest<Workflow>(`/api/v1/workflows/${workflowId}/retry`, {
+    method: "POST",
+    headers: authHeaders(token),
+  });
+}
+
+export async function cancelWorkflow(workflowId: string, token: string) {
+  return apiRequest<Workflow>(`/api/v1/workflows/${workflowId}/cancel`, {
+    method: "POST",
+    headers: authHeaders(token),
+  });
+}
+
+export type TraceSpan = {
+  spanId: string;
+  agentRole: string;
+  taskTitle: string;
+  status: string;
+  provider: string | null;
+  model: string | null;
+  durationMs: number;
+  error: string | null;
+  usage: { total_tokens?: number } | null;
+  artifactsCreated: string[];
+};
 
 export async function getWorkflowTraces(workflowId: string, token: string) {
-  return apiRequest<{ metrics: any; traces: any[] }>(`/api/v1/workflows/${workflowId}/traces`, {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${token}` },
+  return apiRequest<{
+    metrics: { totalSpans: number; completed: number; failed: number; totalDurationMs: number };
+    traces: TraceSpan[];
+  }>(`/api/v1/workflows/${workflowId}/traces`, { method: "GET", headers: authHeaders(token) });
+}
+
+export async function getProject(projectId: string, token: string) {
+  return apiRequest<Project>(`/api/v1/projects/${projectId}`, {
+    method: "GET",
+    headers: authHeaders(token),
   });
 }
 
+export async function updateProject(
+  projectId: string,
+  patch: Partial<Pick<Project, "name" | "description" | "keyFeatures" | "techStack">>,
+  token: string,
+) {
+  return apiRequest<Project>(`/api/v1/projects/${projectId}`, {
+    method: "PATCH",
+    headers: authHeaders(token),
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function getCurrentUser(token: string) {
+  return apiRequest<{ user: CurrentUser; session: { expiresAt: string; rememberMe: boolean } }>(
+    "/api/v1/auth/me",
+    {
+      method: "GET",
+      headers: authHeaders(token),
+    },
+  );
+}
+
+export async function updateCurrentUser(patch: { name: string }, token: string) {
+  return apiRequest<{ user: CurrentUser }>("/api/v1/auth/me", {
+    method: "PATCH",
+    headers: authHeaders(token),
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function changePassword(currentPassword: string, newPassword: string, token: string) {
+  return apiRequest<{ message: string }>("/api/v1/auth/change-password", {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+}
+
+export async function logout() {
+  const token = getStoredSessionToken();
+  setStoredSessionToken(null);
+  if (typeof window !== "undefined") window.sessionStorage.removeItem("helix_active_project_id");
+  if (!token) return;
+  await apiRequest("/api/v1/auth/logout", { method: "POST", headers: authHeaders(token) }).catch(
+    () => null,
+  );
+}
+
+export type SystemHealth = {
+  status: string;
+  environment: string;
+  storage: string;
+  ai: {
+    mode: "live" | "mock";
+    primaryProvider: string;
+    fallbackProviders: string[];
+    configuredProviders: string[];
+    mockFallbackAllowed: boolean;
+  } | null;
+};
+
+export async function getSystemHealth() {
+  return apiRequest<SystemHealth>("/api/v1/health", { method: "GET" });
+}
+
+export type WorkflowEvent = {
+  id?: string;
+  type: string;
+  timestamp: string;
+  payload?: Record<string, unknown> & { taskId?: string; delta?: string; projectId?: string };
+};
+
+/**
+ * Subscribes to the project's Server-Sent Events stream. Returns an unsubscribe function.
+ */
+export function subscribeToProjectEvents(
+  projectId: string,
+  token: string,
+  handlers: { onEvent: (event: WorkflowEvent) => void; onStatus?: (connected: boolean) => void },
+) {
+  const url = `${getBaseUrl()}/api/v1/projects/${projectId}/workflows/stream?token=${encodeURIComponent(token)}`;
+  const source = new EventSource(url);
+  source.onopen = () => handlers.onStatus?.(true);
+  source.onerror = () => handlers.onStatus?.(false);
+  source.onmessage = (message) => {
+    try {
+      handlers.onEvent(JSON.parse(message.data) as WorkflowEvent);
+    } catch {
+      // Ignore malformed frames.
+    }
+  };
+  return () => source.close();
+}

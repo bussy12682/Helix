@@ -156,6 +156,7 @@ function VoiceCall() {
       let interimText = "";
       for (let index = event.resultIndex; index < event.results.length; index += 1) {
         const result = event.results[index];
+        if (!result?.[0]) continue;
         if (result.isFinal) finalText += `${result[0].transcript} `;
         else interimText += `${result[0].transcript} `;
       }
@@ -362,7 +363,7 @@ function VoiceCall() {
       setIsAnalyzing(true);
       try {
         const audio = new Blob(callAudioSegmentsRef.current, {
-          type: callAudioSegmentsRef.current[0].type || "audio/webm",
+          type: callAudioSegmentsRef.current[0]?.type || "audio/webm",
         });
         const result = await transcribeVoiceNote(audio, token);
         description = result.transcript.trim();

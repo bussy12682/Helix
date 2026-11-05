@@ -32,7 +32,7 @@ function GoogleCallback() {
       }
 
       try {
-        const session = await completeGoogleOAuth(search.code);
+        const session = await completeGoogleOAuth(search.code, search.state);
         setStoredSessionToken(session.token);
         toast.success('Signed in with Google — loading your dashboard.');
         navigate({ to: '/dashboard' });
