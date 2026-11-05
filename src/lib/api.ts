@@ -253,6 +253,7 @@ export async function getDashboard(token: string) {
       progress: number;
       ownerId: string;
       createdAt: string;
+      workflowStatus?: WorkflowStatus;
     }>;
     stats: {
       projects: number;
