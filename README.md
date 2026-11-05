@@ -25,7 +25,7 @@ Rather than relying on isolated chatbots or monolithic prompts, HELIX operates a
   - **Quick-Fill Helpers**: 1-click test credential generation on both login and signup.
   - **Instant Email Verification**: Auto-detects tokens in query parameters with 1-click verification.
 
-- 🧪 **Comprehensive End-to-End Test Suite (27/27 Passing)**:
+- 🧪 **Comprehensive End-to-End Test Suite (54/54 Passing)**:
   - Added [`backend/tests/real-project-creation.test.js`](backend/tests/real-project-creation.test.js) validating the entire lifecycle: registration $\rightarrow$ verification $\rightarrow$ login $\rightarrow$ demo access $\rightarrow$ real project creation $\rightarrow$ 9-agent DAG workflow $\rightarrow$ human architecture approval $\rightarrow$ human release approval $\rightarrow$ full office state, artifacts, and traces inspection.
 
 ---
@@ -76,7 +76,7 @@ backend/
 ├── app.js                    # HTTP dispatcher & API endpoints
 ├── config.js                 # Environment & model configuration loader
 ├── storage.js                # State persistence engine
-└── tests/                    # 27 automated unit, integration, & benchmark tests
+└── tests/                    # 54 automated unit, integration, HTTP/SSE & benchmark tests
 ```
 
 ---
@@ -135,7 +135,9 @@ Open `http://localhost:5173` in your browser.
 HELIX includes an automated test and benchmark suite covering contracts, schemas, ModelRouter, DAG orchestrator execution, human approval gates, and end-to-end multi-agent evaluation:
 
 ```sh
-node --test backend/tests/*.js
+npm test            # node --test backend/tests/*.test.js
+npm run typecheck   # tsc --noEmit
+npm run build
 ```
 
 ### Test Suite Highlights
@@ -147,6 +149,10 @@ node --test backend/tests/*.js
 - `model-router.test.js` — Tests capability tier routing and Ollama endpoint support.
 - `orchestrator-dag.test.js` — Tests DAG dependencies, checkpoint gates, and rejection handling.
 - `workflow-api.test.js` — Tests HTTP API endpoints for workflows, office state, and artifacts.
+- `security.test.js` — scrypt hashing + legacy upgrade, logout/me/change-password, reset revokes sessions, OAuth not configured, CORS, body limits, cross-tenant workflow access.
+- `orchestrator-reliability.test.js` — failure/retry, single-flight runs, cancel, revision requests, persistence across restart, interrupted-run resume.
+- `model-router-routing.test.js` — retries/backoff, fallback chain, no silent mock, timeouts, token streaming, cancellation.
+- `http-sse.test.js` — real HTTP server streaming project-scoped SSE events.
 - `real-project-creation.test.js` — Complete integration test verifying user auth, project creation, human approval gates, and full 9-agent workforce execution.
 
 ---
@@ -156,7 +162,10 @@ node --test backend/tests/*.js
 ### Authentication
 - `POST /api/v1/auth/register` — Create user account with complexity validation
 - `POST /api/v1/auth/login` — Authenticate user and issue session token
-- `POST /api/v1/auth/demo` — Instant 1-click demo login
+- `POST /api/v1/auth/demo` — 1-click demo login (disabled in production unless `HELIX_ENABLE_DEMO=true`)
+- `GET /api/v1/auth/me`, `PATCH /api/v1/auth/me` — Current user / update display name
+- `POST /api/v1/auth/logout` — Revoke the current session
+- `POST /api/v1/auth/change-password` — Change password (revokes other sessions)
 - `POST /api/v1/auth/verify-email` — Complete email verification
 - `POST /api/v1/auth/password-reset/request` — Request password reset token
 - `POST /api/v1/auth/password-reset/complete` — Complete password reset
@@ -164,6 +173,7 @@ node --test backend/tests/*.js
 ### Projects & Ingestion
 - `GET /api/v1/projects` — List workspace projects
 - `POST /api/v1/projects` — Create new project
+- `PATCH /api/v1/projects/:id` — Edit project brief (name, description, features, stack)
 - `POST /api/v1/projects/analyze` — Analyze brief via PM agent
 - `POST /api/v1/projects/extract-document` — Extract text from PDF, DOCX, or Markdown specs
 - `POST /api/v1/voice/transcribe` — Transcribe voice note
@@ -175,12 +185,16 @@ node --test backend/tests/*.js
 - `GET /api/v1/projects/:id/office` — Retrieve live floor state for the 9 agents
 - `GET /api/v1/projects/:id/artifacts` — Fetch generated workspace files & code
 - `GET /api/v1/projects/:id/workflows/stream` — SSE real-time telemetry stream
-- `POST /api/v1/workflows/:id/approve` — Submit Human Approval checkpoint decision
+- `POST /api/v1/workflows/:id/approve` — Checkpoint decision: `{ approved, comments, revise }` (approve / request revision / reject)
+- `POST /api/v1/workflows/:id/retry` — Re-run failed or cancelled tasks
+- `POST /api/v1/workflows/:id/cancel` — Cancel an active workflow and abort in-flight model calls
 - `GET /api/v1/workflows/:id/traces` — Retrieve execution spans and telemetry metrics
 
 ---
 
 ## Documentation
+
+- [`docs/PRODUCTION_READINESS.md`](docs/PRODUCTION_READINESS.md) — hardening changes, outstanding issues, deployment requirements.
 
 Detailed technical documentation is available in [`docs/AI_ARCHITECTURE.md`](docs/AI_ARCHITECTURE.md).
 

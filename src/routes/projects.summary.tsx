@@ -9,13 +9,23 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { analyzeProject, createProject, getStoredSessionToken, startProjectWorkflow, type ProjectAnalysis } from "@/lib/api";
+import {
+  analyzeProject,
+  createProject,
+  getStoredSessionToken,
+  startProjectWorkflow,
+  type ProjectAnalysis,
+} from "@/lib/api";
 
 export const Route = createFileRoute("/projects/summary")({
   head: () => ({
     meta: [
       { title: "Project Summary — HELIX" },
-      { name: "description", content: "Review the structured plan HELIX extracted from your brief before building starts." },
+      {
+        name: "description",
+        content:
+          "Review the structured plan HELIX extracted from your brief before building starts.",
+      },
       { property: "og:title", content: "Project Summary — HELIX" },
       { property: "og:description", content: "Confirm requirements, features and stack." },
     ],
@@ -27,8 +37,8 @@ function readAnalysis() {
   if (typeof window === "undefined") return null;
 
   try {
-    const raw = window.sessionStorage.getItem('helix_project_analysis');
-    return raw ? JSON.parse(raw) as ProjectAnalysis : null;
+    const raw = window.sessionStorage.getItem("helix_project_analysis");
+    return raw ? (JSON.parse(raw) as ProjectAnalysis) : null;
   } catch {
     return null;
   }
@@ -50,7 +60,9 @@ function Summary() {
   }
 
   function addListItem(field: "keyFeatures" | "techStack") {
-    setAnalysis((current) => current ? { ...current, [field]: [...current[field], ""] } : current);
+    setAnalysis((current) =>
+      current ? { ...current, [field]: [...current[field], ""] } : current,
+    );
   }
 
   function removeListItem(field: "keyFeatures" | "techStack", index: number) {
@@ -62,37 +74,44 @@ function Summary() {
 
   async function regenerateSuggestions() {
     if (!analysis?.name.trim() || !analysis.description.trim()) {
-      toast.error('Add a project name and description before regenerating suggestions.');
+      toast.error("Add a project name and description before regenerating suggestions.");
       return;
     }
 
     const token = getStoredSessionToken();
     if (!token) {
-      navigate({ to: '/login' });
+      navigate({ to: "/login" });
       return;
     }
 
     setIsRegenerating(true);
     try {
-      const suggestions = await analyzeProject({
-        name: analysis.name.trim(),
-        description: analysis.description.trim(),
-      }, token);
-      setAnalysis((current) => current ? {
-        ...current,
-        keyFeatures: suggestions.keyFeatures,
-        techStack: suggestions.techStack,
-      } : current);
-      toast.success('AI suggestions refreshed. You can edit them below.');
+      const suggestions = await analyzeProject(
+        {
+          name: analysis.name.trim(),
+          description: analysis.description.trim(),
+        },
+        token,
+      );
+      setAnalysis((current) =>
+        current
+          ? {
+              ...current,
+              keyFeatures: suggestions.keyFeatures,
+              techStack: suggestions.techStack,
+            }
+          : current,
+      );
+      toast.success("AI suggestions refreshed. You can edit them below.");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Could not refresh AI suggestions.');
+      toast.error(error instanceof Error ? error.message : "Could not refresh AI suggestions.");
     } finally {
       setIsRegenerating(false);
     }
   }
 
   useEffect(() => {
-    if (!analysis) navigate({ to: '/projects/new' });
+    if (!analysis) navigate({ to: "/projects/new" });
   }, [analysis, navigate]);
 
   if (!analysis) return null;
@@ -101,29 +120,34 @@ function Summary() {
     if (!analysis) return;
     const token = getStoredSessionToken();
     if (!token) {
-      navigate({ to: '/login' });
+      navigate({ to: "/login" });
       return;
     }
 
     setIsConfirming(true);
     try {
-      const created = await createProject({
-        name: analysis.name.trim(),
-        description: analysis.description.trim(),
-        keyFeatures: analysis.keyFeatures.map((feature) => feature.trim()).filter(Boolean),
-        techStack: analysis.techStack.map((technology) => technology.trim()).filter(Boolean),
-      }, token);
-      sessionStorage.removeItem('helix_project_analysis');
-      sessionStorage.setItem('helix_active_project_id', created.id);
+      const created = await createProject(
+        {
+          name: analysis.name.trim(),
+          description: analysis.description.trim(),
+          keyFeatures: analysis.keyFeatures.map((feature) => feature.trim()).filter(Boolean),
+          techStack: analysis.techStack.map((technology) => technology.trim()).filter(Boolean),
+        },
+        token,
+      );
+      sessionStorage.removeItem("helix_project_analysis");
+      sessionStorage.setItem("helix_active_project_id", created.id);
       try {
         await startProjectWorkflow(created.id, token);
-        toast.success('Project created. Your HELIX AI engineering team is active.');
+        toast.success("Project created. Your HELIX AI engineering team is active.");
       } catch (workflowError) {
-        toast.error(`Project created, but the AI workflow could not start: ${workflowError instanceof Error ? workflowError.message : 'unknown error'}`);
+        toast.error(
+          `Project created, but the AI workflow could not start: ${workflowError instanceof Error ? workflowError.message : "unknown error"}`,
+        );
       }
-      navigate({ to: '/office' });
+      navigate({ to: "/office" });
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Could not create project.');
+      toast.error(error instanceof Error ? error.message : "Could not create project.");
     } finally {
       setIsConfirming(false);
     }
@@ -135,12 +159,18 @@ function Summary() {
         <Panel
           title="Requirements"
           description="AI suggestions are editable before confirming"
-          action={(
-            <Button type="button" variant="outline" size="sm" onClick={() => void regenerateSuggestions()} disabled={isRegenerating}>
+          action={
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void regenerateSuggestions()}
+              disabled={isRegenerating}
+            >
               <Sparkles className="h-4 w-4" />
-              {isRegenerating ? 'Thinking...' : 'Regenerate AI suggestions'}
+              {isRegenerating ? "Thinking..." : "Regenerate AI suggestions"}
             </Button>
-          )}
+          }
         >
           <div className="space-y-4">
             <div className="space-y-1.5">
@@ -163,7 +193,12 @@ function Summary() {
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-3">
                 <p className="text-sm font-medium">AI-suggested key features</p>
-                <Button type="button" variant="ghost" size="sm" onClick={() => addListItem("keyFeatures")}>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => addListItem("keyFeatures")}
+                >
                   <Plus className="h-4 w-4" />
                   Add feature
                 </Button>
@@ -176,7 +211,13 @@ function Summary() {
                       value={feature}
                       onChange={(event) => updateList("keyFeatures", index, event.target.value)}
                     />
-                    <Button type="button" variant="ghost" size="icon" aria-label={`Remove key feature ${index + 1}`} onClick={() => removeListItem("keyFeatures", index)}>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      aria-label={`Remove key feature ${index + 1}`}
+                      onClick={() => removeListItem("keyFeatures", index)}
+                    >
                       <Trash2 className="h-4 w-4" />
                     </Button>
                   </div>
@@ -188,8 +229,11 @@ function Summary() {
             <Button variant="ghost" asChild>
               <Link to="/projects/new">Back</Link>
             </Button>
-            <Button onClick={confirmProject} disabled={isConfirming || !analysis.name.trim() || !analysis.description.trim()}>
-              {isConfirming ? 'Creating project...' : 'Confirm & Continue'}
+            <Button
+              onClick={confirmProject}
+              disabled={isConfirming || !analysis.name.trim() || !analysis.description.trim()}
+            >
+              {isConfirming ? "Creating project..." : "Confirm & Continue"}
             </Button>
           </div>
         </Panel>
@@ -203,12 +247,23 @@ function Summary() {
                   value={technology}
                   onChange={(event) => updateList("techStack", index, event.target.value)}
                 />
-                <Button type="button" variant="ghost" size="icon" aria-label={`Remove technology ${index + 1}`} onClick={() => removeListItem("techStack", index)}>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  aria-label={`Remove technology ${index + 1}`}
+                  onClick={() => removeListItem("techStack", index)}
+                >
                   <Trash2 className="h-4 w-4" />
                 </Button>
               </div>
             ))}
-            <Button type="button" variant="outline" size="sm" onClick={() => addListItem("techStack")}>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => addListItem("techStack")}
+            >
               <Plus className="h-4 w-4" />
               Add technology
             </Button>

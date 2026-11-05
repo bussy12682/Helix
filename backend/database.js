@@ -4,13 +4,13 @@
  */
 export function createDatabaseFoundation(options = {}) {
   const config = {
-    databaseUrl: options.databaseUrl ?? '',
-    nodeEnv: options.nodeEnv ?? 'development',
+    databaseUrl: options.databaseUrl ?? "",
+    nodeEnv: options.nodeEnv ?? "development",
   };
 
   const state = {
-    mode: config.databaseUrl ? 'postgres' : 'memory',
-    status: config.databaseUrl ? 'postgres-not-implemented' : 'safe-memory',
+    mode: config.databaseUrl ? "postgres" : "memory",
+    status: config.databaseUrl ? "postgres-not-implemented" : "safe-memory",
     initialized: false,
     connection: null,
     schema: [],
@@ -37,18 +37,18 @@ export function createDatabaseFoundation(options = {}) {
     }
 
     if (!config.databaseUrl) {
-      state.mode = 'memory';
-      state.status = 'safe-memory';
+      state.mode = "memory";
+      state.status = "safe-memory";
       state.initialized = true;
-      state.schema = ['users', 'projects', 'sessions', 'audit_events'];
+      state.schema = ["users", "projects", "sessions", "audit_events"];
       state.requiresExternalDatabase = false;
       state.safeFallbackEnabled = true;
     } else {
       // No PostgreSQL adapter exists yet: persistence uses the JSON file store (HELIX_STORAGE_PATH).
-      state.mode = 'postgres';
-      state.status = 'postgres-not-implemented';
+      state.mode = "postgres";
+      state.status = "postgres-not-implemented";
       state.initialized = true;
-      state.schema = ['users', 'projects', 'sessions', 'audit_events'];
+      state.schema = ["users", "projects", "sessions", "audit_events"];
       state.requiresExternalDatabase = true;
       state.safeFallbackEnabled = false;
     }

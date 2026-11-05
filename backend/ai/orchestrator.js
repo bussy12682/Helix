@@ -4,35 +4,39 @@
  * human approval gates, automated review loops (QA & Security), and context isolation.
  */
 
-import { randomUUID } from 'node:crypto';
-import { AGENT_ROLES, AGENT_METADATA } from './contracts.js';
+import { randomUUID } from "node:crypto";
+import { AGENT_ROLES, AGENT_METADATA } from "./contracts.js";
 
 export const WORKFLOW_STATUS = {
-  PENDING: 'pending',
-  RUNNING: 'running',
-  AWAITING_APPROVAL: 'awaiting_approval',
-  COMPLETED: 'completed',
-  FAILED: 'failed',
-  CANCELLED: 'cancelled',
+  PENDING: "pending",
+  RUNNING: "running",
+  AWAITING_APPROVAL: "awaiting_approval",
+  COMPLETED: "completed",
+  FAILED: "failed",
+  CANCELLED: "cancelled",
 };
 
 export const TASK_STATUS = {
-  QUEUED: 'queued',
-  RUNNING: 'running',
-  AWAITING_APPROVAL: 'awaiting_approval',
-  COMPLETED: 'completed',
-  NEEDS_REVISION: 'needs_revision',
-  FAILED: 'failed',
-  CANCELLED: 'cancelled',
+  QUEUED: "queued",
+  RUNNING: "running",
+  AWAITING_APPROVAL: "awaiting_approval",
+  COMPLETED: "completed",
+  NEEDS_REVISION: "needs_revision",
+  FAILED: "failed",
+  CANCELLED: "cancelled",
 };
 
-const TERMINAL_STATUSES = new Set([WORKFLOW_STATUS.COMPLETED, WORKFLOW_STATUS.FAILED, WORKFLOW_STATUS.CANCELLED]);
+const TERMINAL_STATUSES = new Set([
+  WORKFLOW_STATUS.COMPLETED,
+  WORKFLOW_STATUS.FAILED,
+  WORKFLOW_STATUS.CANCELLED,
+]);
 const STREAM_EMIT_INTERVAL_MS = 250;
 
 export class WorkflowStateError extends Error {
-  constructor(message, code = 'INVALID_WORKFLOW_STATE') {
+  constructor(message, code = "INVALID_WORKFLOW_STATE") {
     super(message);
-    this.name = 'WorkflowStateError';
+    this.name = "WorkflowStateError";
     this.code = code;
   }
 }
@@ -59,7 +63,10 @@ export class Orchestrator {
     this.storage = storage;
     for (const workflow of savedWorkflows) {
       if (!workflow?.id) continue;
-      if (workflow.status === WORKFLOW_STATUS.RUNNING || workflow.status === WORKFLOW_STATUS.PENDING) {
+      if (
+        workflow.status === WORKFLOW_STATUS.RUNNING ||
+        workflow.status === WORKFLOW_STATUS.PENDING
+      ) {
         for (const task of workflow.tasks) {
           if (task.status === TASK_STATUS.RUNNING) {
             task.status = TASK_STATUS.QUEUED;
@@ -98,7 +105,11 @@ export class Orchestrator {
   }
 
   emit(type, workflow, payload = {}) {
-    this.observability.emitEvent(type, { workflowId: workflow.id, projectId: workflow.projectId, ...payload });
+    this.observability.emitEvent(type, {
+      workflowId: workflow.id,
+      projectId: workflow.projectId,
+      ...payload,
+    });
   }
 
   /**
@@ -107,7 +118,10 @@ export class Orchestrator {
   async createWorkflow(projectId, projectData = {}) {
     const existing = this.getWorkflowForProject(projectId);
     if (existing && !TERMINAL_STATUSES.has(existing.status)) {
-      throw new WorkflowStateError('A workflow is already active for this project.', 'WORKFLOW_ALREADY_ACTIVE');
+      throw new WorkflowStateError(
+        "A workflow is already active for this project.",
+        "WORKFLOW_ALREADY_ACTIVE",
+      );
     }
     const workflowId = `wf_${randomUUID()}`;
 
@@ -118,7 +132,7 @@ export class Orchestrator {
       {
         id: `task_${randomUUID()}`,
         agent: AGENT_ROLES.PRODUCT_MANAGER,
-        title: 'Define Product Requirements & User Stories',
+        title: "Define Product Requirements & User Stories",
         status: TASK_STATUS.QUEUED,
         dependencies: [],
         progress: 0,
@@ -129,19 +143,19 @@ export class Orchestrator {
       {
         id: `task_${randomUUID()}`,
         agent: AGENT_ROLES.SYSTEM_ARCHITECT,
-        title: 'Formulate Architecture, Tech Stack & API Specs',
+        title: "Formulate Architecture, Tech Stack & API Specs",
         status: TASK_STATUS.QUEUED,
         dependencies: [0], // indexes to be resolved to IDs
         progress: 0,
         output: null,
-        requiresApproval: 'architecture_approval',
+        requiresApproval: "architecture_approval",
         reviewFindings: [],
         attempts: 0,
       },
       {
         id: `task_${randomUUID()}`,
         agent: AGENT_ROLES.DATABASE_ENGINEER,
-        title: 'Model Relational Schemas, Constraints & Indexes',
+        title: "Model Relational Schemas, Constraints & Indexes",
         status: TASK_STATUS.QUEUED,
         dependencies: [1],
         progress: 0,
@@ -152,7 +166,7 @@ export class Orchestrator {
       {
         id: `task_${randomUUID()}`,
         agent: AGENT_ROLES.BACKEND_ENGINEER,
-        title: 'Build API Endpoints, Business Logic & Security',
+        title: "Build API Endpoints, Business Logic & Security",
         status: TASK_STATUS.QUEUED,
         dependencies: [1, 2],
         progress: 0,
@@ -163,7 +177,7 @@ export class Orchestrator {
       {
         id: `task_${randomUUID()}`,
         agent: AGENT_ROLES.FRONTEND_ENGINEER,
-        title: 'Implement UI Views, Components & State Management',
+        title: "Implement UI Views, Components & State Management",
         status: TASK_STATUS.QUEUED,
         dependencies: [1], // can run parallel with database & backend
         progress: 0,
@@ -174,7 +188,7 @@ export class Orchestrator {
       {
         id: `task_${randomUUID()}`,
         agent: AGENT_ROLES.SECURITY_ENGINEER,
-        title: 'Execute Threat Modeling & Security Review',
+        title: "Execute Threat Modeling & Security Review",
         status: TASK_STATUS.QUEUED,
         dependencies: [3],
         progress: 0,
@@ -185,7 +199,7 @@ export class Orchestrator {
       {
         id: `task_${randomUUID()}`,
         agent: AGENT_ROLES.QA_ENGINEER,
-        title: 'Run QA Test Suite & Requirement Verification',
+        title: "Run QA Test Suite & Requirement Verification",
         status: TASK_STATUS.QUEUED,
         dependencies: [3, 4],
         progress: 0,
@@ -196,19 +210,19 @@ export class Orchestrator {
       {
         id: `task_${randomUUID()}`,
         agent: AGENT_ROLES.DEVOPS_ENGINEER,
-        title: 'Generate Containerization & CI/CD Pipelines',
+        title: "Generate Containerization & CI/CD Pipelines",
         status: TASK_STATUS.QUEUED,
         dependencies: [5, 6],
         progress: 0,
         output: null,
-        requiresApproval: 'release_approval',
+        requiresApproval: "release_approval",
         reviewFindings: [],
         attempts: 0,
       },
       {
         id: `task_${randomUUID()}`,
         agent: AGENT_ROLES.DOCUMENTATION_ENGINEER,
-        title: 'Synthesize README & Developer Documentation',
+        title: "Synthesize README & Developer Documentation",
         status: TASK_STATUS.QUEUED,
         dependencies: [7],
         progress: 0,
@@ -239,7 +253,7 @@ export class Orchestrator {
 
     this.workflows.set(workflowId, workflow);
     this.persist(workflow);
-    this.emit('workflow_created', workflow);
+    this.emit("workflow_created", workflow);
 
     return workflow;
   }
@@ -296,18 +310,22 @@ export class Orchestrator {
 
   async runLoop(workflow, options) {
     while (true) {
-      if (TERMINAL_STATUSES.has(workflow.status) || workflow.status === WORKFLOW_STATUS.AWAITING_APPROVAL) {
+      if (
+        TERMINAL_STATUSES.has(workflow.status) ||
+        workflow.status === WORKFLOW_STATUS.AWAITING_APPROVAL
+      ) {
         return workflow;
       }
 
       if (workflow.status !== WORKFLOW_STATUS.RUNNING) {
         workflow.status = WORKFLOW_STATUS.RUNNING;
         this.persist(workflow);
-        this.emit('workflow_status', workflow, { status: workflow.status });
+        this.emit("workflow_status", workflow, { status: workflow.status });
       }
 
       const readyTasks = workflow.tasks.filter((task) => {
-        if (task.status !== TASK_STATUS.QUEUED && task.status !== TASK_STATUS.NEEDS_REVISION) return false;
+        if (task.status !== TASK_STATUS.QUEUED && task.status !== TASK_STATUS.NEEDS_REVISION)
+          return false;
         return task.dependencies.every((depId) => {
           const depTask = workflow.tasks.find((t) => t.id === depId);
           return depTask && depTask.status === TASK_STATUS.COMPLETED;
@@ -319,26 +337,28 @@ export class Orchestrator {
           workflow.status = WORKFLOW_STATUS.COMPLETED;
           workflow.completedAt = new Date().toISOString();
           this.persist(workflow);
-          this.emit('workflow_completed', workflow);
+          this.emit("workflow_completed", workflow);
         } else {
-          this.failWorkflow(workflow, 'No runnable tasks remain; the task graph is blocked.');
+          this.failWorkflow(workflow, "No runnable tasks remain; the task graph is blocked.");
         }
         return workflow;
       }
 
-      const results = await Promise.allSettled(readyTasks.map((task) => this.executeTask(workflow, task, options)));
+      const results = await Promise.allSettled(
+        readyTasks.map((task) => this.executeTask(workflow, task, options)),
+      );
 
       if (workflow.status === WORKFLOW_STATUS.CANCELLED) return workflow;
 
-      const failure = results.find((r) => r.status === 'rejected');
+      const failure = results.find((r) => r.status === "rejected");
       if (failure) {
-        this.failWorkflow(workflow, failure.reason?.message || 'Agent task failed.');
+        this.failWorkflow(workflow, failure.reason?.message || "Agent task failed.");
         return workflow;
       }
 
-      const checkpointTask = workflow.tasks.find((t) => (
-        t.status === TASK_STATUS.COMPLETED && t.requiresApproval && !t.approvalGranted
-      ));
+      const checkpointTask = workflow.tasks.find(
+        (t) => t.status === TASK_STATUS.COMPLETED && t.requiresApproval && !t.approvalGranted,
+      );
 
       if (checkpointTask) {
         workflow.status = WORKFLOW_STATUS.AWAITING_APPROVAL;
@@ -347,10 +367,10 @@ export class Orchestrator {
           checkpointType: checkpointTask.requiresApproval,
           agent: checkpointTask.agent,
           title: checkpointTask.title,
-          summary: checkpointTask.output?.summary || 'Review required before proceeding.',
+          summary: checkpointTask.output?.summary || "Review required before proceeding.",
         };
         this.persist(workflow);
-        this.emit('checkpoint_reached', workflow, { checkpoint: workflow.currentCheckpoint });
+        this.emit("checkpoint_reached", workflow, { checkpoint: workflow.currentCheckpoint });
         return workflow;
       }
 
@@ -363,7 +383,7 @@ export class Orchestrator {
     workflow.status = WORKFLOW_STATUS.FAILED;
     workflow.error = message;
     this.persist(workflow);
-    this.emit('workflow_failed', workflow, { error: message });
+    this.emit("workflow_failed", workflow, { error: message });
   }
 
   /**
@@ -377,20 +397,20 @@ export class Orchestrator {
     task.startedAt = new Date().toISOString();
     task.streamedChars = 0;
     this.persist(workflow);
-    this.emit('task_started', workflow, { taskId: task.id, agent: task.agent, title: task.title });
+    this.emit("task_started", workflow, { taskId: task.id, agent: task.agent, title: task.title });
 
-    let pendingDelta = '';
+    let pendingDelta = "";
     let lastEmit = 0;
     const flushStream = () => {
       if (!pendingDelta) return;
-      this.emit('task_stream', workflow, {
+      this.emit("task_stream", workflow, {
         taskId: task.id,
         agent: task.agent,
         delta: pendingDelta,
         chars: task.streamedChars,
         progress: task.progress,
       });
-      pendingDelta = '';
+      pendingDelta = "";
       lastEmit = Date.now();
     };
 
@@ -417,7 +437,10 @@ export class Orchestrator {
           onToken: (delta) => {
             task.streamedChars += delta.length;
             // Approaches 90% asymptotically while tokens arrive.
-            task.progress = Math.min(89, 25 + Math.round(64 * (1 - Math.exp(-task.streamedChars / 6000))));
+            task.progress = Math.min(
+              89,
+              25 + Math.round(64 * (1 - Math.exp(-task.streamedChars / 6000))),
+            );
             pendingDelta += delta;
             if (Date.now() - lastEmit >= STREAM_EMIT_INTERVAL_MS) flushStream();
           },
@@ -426,7 +449,7 @@ export class Orchestrator {
           task.provider = meta.provider;
           task.model = meta.model;
           task.usage = meta.usage ?? null;
-          task.simulated = meta.provider === 'mock';
+          task.simulated = meta.provider === "mock";
           task.generationAttempts = meta.attempts;
         },
       });
@@ -463,7 +486,7 @@ export class Orchestrator {
       task.durationMs = Date.parse(task.completedAt) - Date.parse(task.startedAt);
       this.persist(workflow);
 
-      this.emit('task_completed', workflow, {
+      this.emit("task_completed", workflow, {
         taskId: task.id,
         agent: task.agent,
         summary: output.summary,
@@ -474,7 +497,7 @@ export class Orchestrator {
       return task;
     } catch (error) {
       flushStream();
-      if (workflow.status === WORKFLOW_STATUS.CANCELLED || error.name === 'AbortError') {
+      if (workflow.status === WORKFLOW_STATUS.CANCELLED || error.name === "AbortError") {
         task.status = TASK_STATUS.CANCELLED;
         task.progress = 0;
         this.persist(workflow);
@@ -485,7 +508,11 @@ export class Orchestrator {
       task.error = error.message;
       this.persist(workflow);
 
-      this.emit('task_failed', workflow, { taskId: task.id, agent: task.agent, error: error.message });
+      this.emit("task_failed", workflow, {
+        taskId: task.id,
+        agent: task.agent,
+        error: error.message,
+      });
 
       throw error;
     }
@@ -501,23 +528,29 @@ export class Orchestrator {
       return { needsRevision: false };
     }
 
-    const secTask = workflow.tasks.find((t) => t.agent === AGENT_ROLES.SECURITY_ENGINEER && t.status === TASK_STATUS.COMPLETED);
-    const qaTask = workflow.tasks.find((t) => t.agent === AGENT_ROLES.QA_ENGINEER && t.status === TASK_STATUS.COMPLETED);
+    const secTask = workflow.tasks.find(
+      (t) => t.agent === AGENT_ROLES.SECURITY_ENGINEER && t.status === TASK_STATUS.COMPLETED,
+    );
+    const qaTask = workflow.tasks.find(
+      (t) => t.agent === AGENT_ROLES.QA_ENGINEER && t.status === TASK_STATUS.COMPLETED,
+    );
 
     let revisionRequired = false;
     const findings = [];
 
     if (secTask && secTask.output) {
-      const highRisks = (secTask.output.risks || []).filter((r) => r.severity === 'high' || r.severity === 'critical');
+      const highRisks = (secTask.output.risks || []).filter(
+        (r) => r.severity === "high" || r.severity === "critical",
+      );
       if (highRisks.length > 0) {
         revisionRequired = true;
         findings.push(...highRisks.map((r) => `[Security ${r.severity}] ${r.description}`));
       }
     }
 
-    if (qaTask && qaTask.output && qaTask.output.status === 'failed') {
+    if (qaTask && qaTask.output && qaTask.output.status === "failed") {
       revisionRequired = true;
-      findings.push('[QA Defect] Verification tests failed on implementation.');
+      findings.push("[QA Defect] Verification tests failed on implementation.");
     }
 
     if (revisionRequired && findings.length > 0) {
@@ -531,7 +564,12 @@ export class Orchestrator {
       }
 
       // Reset downstream tasks (Sec, QA, DevOps, Docs) to queued
-      const downstreamAgents = [AGENT_ROLES.SECURITY_ENGINEER, AGENT_ROLES.QA_ENGINEER, AGENT_ROLES.DEVOPS_ENGINEER, AGENT_ROLES.DOCUMENTATION_ENGINEER];
+      const downstreamAgents = [
+        AGENT_ROLES.SECURITY_ENGINEER,
+        AGENT_ROLES.QA_ENGINEER,
+        AGENT_ROLES.DEVOPS_ENGINEER,
+        AGENT_ROLES.DOCUMENTATION_ENGINEER,
+      ];
       for (const t of workflow.tasks) {
         if (downstreamAgents.includes(t.agent)) {
           t.status = TASK_STATUS.QUEUED;
@@ -539,7 +577,10 @@ export class Orchestrator {
         }
       }
 
-      this.emit('review_loop_triggered', workflow, { iteration: workflow.reviewLoopCount, findings });
+      this.emit("review_loop_triggered", workflow, {
+        iteration: workflow.reviewLoopCount,
+        findings,
+      });
 
       return { needsRevision: true, findings };
     }
@@ -564,12 +605,19 @@ export class Orchestrator {
   /**
    * Applies a checkpoint decision synchronously without waiting for execution.
    */
-  decideCheckpoint(workflowId, checkpointType, { approved = true, comments = '', revise = false } = {}) {
+  decideCheckpoint(
+    workflowId,
+    checkpointType,
+    { approved = true, comments = "", revise = false } = {},
+  ) {
     const workflow = this.getWorkflow(workflowId);
-    if (!workflow) throw new WorkflowStateError(`Workflow ${workflowId} not found`, 'WORKFLOW_NOT_FOUND');
+    if (!workflow)
+      throw new WorkflowStateError(`Workflow ${workflowId} not found`, "WORKFLOW_NOT_FOUND");
 
     if (workflow.status !== WORKFLOW_STATUS.AWAITING_APPROVAL || !workflow.currentCheckpoint) {
-      throw new WorkflowStateError(`Workflow is not currently awaiting approval for "${checkpointType}"`);
+      throw new WorkflowStateError(
+        `Workflow is not currently awaiting approval for "${checkpointType}"`,
+      );
     }
     if (checkpointType && workflow.currentCheckpoint.checkpointType !== checkpointType) {
       throw new WorkflowStateError(
@@ -578,29 +626,33 @@ export class Orchestrator {
     }
 
     const checkpointTask = workflow.tasks.find((t) => t.id === workflow.currentCheckpoint.taskId);
-    if (!checkpointTask) throw new WorkflowStateError('Checkpoint task not found in workflow');
+    if (!checkpointTask) throw new WorkflowStateError("Checkpoint task not found in workflow");
     const type = workflow.currentCheckpoint.checkpointType;
 
     if (!approved && revise) {
       checkpointTask.status = TASK_STATUS.NEEDS_REVISION;
       checkpointTask.progress = 0;
-      checkpointTask.reviewFindings = [`[Human reviewer] ${comments || 'Revise and improve this output.'}`];
+      checkpointTask.reviewFindings = [
+        `[Human reviewer] ${comments || "Revise and improve this output."}`,
+      ];
       workflow.currentCheckpoint = null;
       workflow.status = WORKFLOW_STATUS.RUNNING;
       this.persist(workflow);
-      this.emit('checkpoint_revision_requested', workflow, { checkpointType: type, comments });
-      this.runNextSteps(workflowId).catch((error) => console.error('[Orchestrator] Revision run failed:', error));
+      this.emit("checkpoint_revision_requested", workflow, { checkpointType: type, comments });
+      this.runNextSteps(workflowId).catch((error) =>
+        console.error("[Orchestrator] Revision run failed:", error),
+      );
       return workflow;
     }
 
     if (!approved) {
       workflow.status = WORKFLOW_STATUS.FAILED;
-      workflow.error = `Rejected by human reviewer${comments ? `: ${comments}` : ''}`;
+      workflow.error = `Rejected by human reviewer${comments ? `: ${comments}` : ""}`;
       workflow.currentCheckpoint = null;
       checkpointTask.status = TASK_STATUS.FAILED;
       checkpointTask.error = workflow.error;
       this.persist(workflow);
-      this.emit('checkpoint_rejected', workflow, { checkpointType: type, comments });
+      this.emit("checkpoint_rejected", workflow, { checkpointType: type, comments });
       return workflow;
     }
 
@@ -611,7 +663,7 @@ export class Orchestrator {
     workflow.currentCheckpoint = null;
     workflow.status = WORKFLOW_STATUS.RUNNING;
     this.persist(workflow);
-    this.emit('checkpoint_approved', workflow, { checkpointType: type, comments });
+    this.emit("checkpoint_approved", workflow, { checkpointType: type, comments });
     return workflow;
   }
 
@@ -621,9 +673,15 @@ export class Orchestrator {
    */
   retryWorkflow(workflowId) {
     const workflow = this.getWorkflow(workflowId);
-    if (!workflow) throw new WorkflowStateError(`Workflow ${workflowId} not found`, 'WORKFLOW_NOT_FOUND');
-    if (workflow.status !== WORKFLOW_STATUS.FAILED && workflow.status !== WORKFLOW_STATUS.CANCELLED) {
-      throw new WorkflowStateError(`Only failed or cancelled workflows can be retried (status: ${workflow.status}).`);
+    if (!workflow)
+      throw new WorkflowStateError(`Workflow ${workflowId} not found`, "WORKFLOW_NOT_FOUND");
+    if (
+      workflow.status !== WORKFLOW_STATUS.FAILED &&
+      workflow.status !== WORKFLOW_STATUS.CANCELLED
+    ) {
+      throw new WorkflowStateError(
+        `Only failed or cancelled workflows can be retried (status: ${workflow.status}).`,
+      );
     }
     for (const task of workflow.tasks) {
       if ([TASK_STATUS.FAILED, TASK_STATUS.CANCELLED, TASK_STATUS.RUNNING].includes(task.status)) {
@@ -635,18 +693,19 @@ export class Orchestrator {
     workflow.error = null;
     workflow.status = WORKFLOW_STATUS.PENDING;
     this.persist(workflow);
-    this.emit('workflow_retried', workflow);
+    this.emit("workflow_retried", workflow);
     const run = this.runNextSteps(workflowId);
-    run.catch((error) => console.error('[Orchestrator] Retry run failed:', error));
+    run.catch((error) => console.error("[Orchestrator] Retry run failed:", error));
     return { workflow, run };
   }
 
   /**
    * Cancels an active workflow and aborts in-flight model calls.
    */
-  cancelWorkflow(workflowId, reason = 'Cancelled by user') {
+  cancelWorkflow(workflowId, reason = "Cancelled by user") {
     const workflow = this.getWorkflow(workflowId);
-    if (!workflow) throw new WorkflowStateError(`Workflow ${workflowId} not found`, 'WORKFLOW_NOT_FOUND');
+    if (!workflow)
+      throw new WorkflowStateError(`Workflow ${workflowId} not found`, "WORKFLOW_NOT_FOUND");
     if (TERMINAL_STATUSES.has(workflow.status)) {
       throw new WorkflowStateError(`Workflow is already ${workflow.status}.`);
     }
@@ -661,7 +720,7 @@ export class Orchestrator {
     }
     this.abortControllers.get(workflowId)?.abort();
     this.persist(workflow);
-    this.emit('workflow_cancelled', workflow, { reason });
+    this.emit("workflow_cancelled", workflow, { reason });
     return workflow;
   }
 
@@ -674,12 +733,12 @@ export class Orchestrator {
       // Default idle state for all 9 agents
       return {
         hasActiveWorkflow: false,
-        workflowStatus: 'idle',
+        workflowStatus: "idle",
         agents: Object.values(AGENT_METADATA).map((meta) => ({
           ...meta,
-          status: 'idle',
+          status: "idle",
           progress: 0,
-          currentTask: 'Awaiting project dispatch',
+          currentTask: "Awaiting project dispatch",
         })),
         tasks: [],
       };
@@ -689,9 +748,9 @@ export class Orchestrator {
     for (const meta of Object.values(AGENT_METADATA)) {
       agentStateMap.set(meta.role, {
         ...meta,
-        status: 'idle',
+        status: "idle",
         progress: 0,
-        currentTask: 'Idle',
+        currentTask: "Idle",
       });
     }
 
@@ -700,17 +759,17 @@ export class Orchestrator {
       if (entry) {
         entry.currentTask = task.title;
         entry.progress = task.progress;
-        if (task.status === TASK_STATUS.RUNNING) entry.status = 'working';
-        else if (task.status === TASK_STATUS.QUEUED) entry.status = 'queued';
-        else if (task.status === TASK_STATUS.COMPLETED) entry.status = 'done';
-        else if (task.status === TASK_STATUS.AWAITING_APPROVAL) entry.status = 'awaiting_approval';
-        else if (task.status === TASK_STATUS.NEEDS_REVISION) entry.status = 'working';
-        else if (task.status === TASK_STATUS.FAILED) entry.status = 'failed';
-        else if (task.status === TASK_STATUS.CANCELLED) entry.status = 'cancelled';
+        if (task.status === TASK_STATUS.RUNNING) entry.status = "working";
+        else if (task.status === TASK_STATUS.QUEUED) entry.status = "queued";
+        else if (task.status === TASK_STATUS.COMPLETED) entry.status = "done";
+        else if (task.status === TASK_STATUS.AWAITING_APPROVAL) entry.status = "awaiting_approval";
+        else if (task.status === TASK_STATUS.NEEDS_REVISION) entry.status = "working";
+        else if (task.status === TASK_STATUS.FAILED) entry.status = "failed";
+        else if (task.status === TASK_STATUS.CANCELLED) entry.status = "cancelled";
         if (task.provider) {
           entry.provider = task.provider;
           entry.model = task.model;
-          entry.simulated = task.provider === 'mock';
+          entry.simulated = task.provider === "mock";
         }
       }
     }
@@ -737,7 +796,7 @@ export class Orchestrator {
         error: t.error || null,
         provider: t.provider || null,
         model: t.model || null,
-        simulated: t.provider === 'mock',
+        simulated: t.provider === "mock",
         attempts: t.attempts ?? 0,
         durationMs: t.durationMs ?? null,
         risks: t.output?.risks ?? [],

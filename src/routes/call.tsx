@@ -6,13 +6,23 @@ import { toast } from "sonner";
 import { HelixMark } from "@/components/helix/logo";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { ApiRequestError, analyzeProject, getStoredSessionToken, sendVoiceTurn, transcribeVoiceNote } from "@/lib/api";
+import {
+  ApiRequestError,
+  analyzeProject,
+  getStoredSessionToken,
+  sendVoiceTurn,
+  transcribeVoiceNote,
+} from "@/lib/api";
 
 export const Route = createFileRoute("/call")({
   head: () => ({
     meta: [
       { title: "Voice Call with HELIX AI" },
-      { name: "description", content: "Brief your AI engineering team by voice and watch requirements form in real time." },
+      {
+        name: "description",
+        content:
+          "Brief your AI engineering team by voice and watch requirements form in real time.",
+      },
       { property: "og:title", content: "Voice Call with HELIX AI" },
       { property: "og:description", content: "Talk through your project with HELIX." },
     ],
@@ -87,7 +97,7 @@ function VoiceCall() {
   const draft = (() => {
     try {
       const raw = sessionStorage.getItem("helix_project_draft");
-      return raw ? JSON.parse(raw) as { name?: string } : {};
+      return raw ? (JSON.parse(raw) as { name?: string }) : {};
     } catch {
       return {};
     }
@@ -95,10 +105,19 @@ function VoiceCall() {
 
   async function sendUserTurn(content: string) {
     const trimmedContent = content.trim();
-    if (!trimmedContent || !draft.name || isReplying || trimmedContent === lastSentTranscriptRef.current) return;
+    if (
+      !trimmedContent ||
+      !draft.name ||
+      isReplying ||
+      trimmedContent === lastSentTranscriptRef.current
+    )
+      return;
 
     lastSentTranscriptRef.current = trimmedContent;
-    const nextMessages = [...conversationRef.current, { role: "user" as const, content: trimmedContent }];
+    const nextMessages = [
+      ...conversationRef.current,
+      { role: "user" as const, content: trimmedContent },
+    ];
     conversationRef.current = nextMessages;
     setMessages(nextMessages);
     setAssistantReply("");
@@ -238,12 +257,18 @@ function VoiceCall() {
         if (event.data.size > 0) callAudioChunksRef.current.push(event.data);
       };
       recorder.onstop = async () => {
-        const blob = new Blob(callAudioChunksRef.current, { type: recorder.mimeType || "audio/webm" });
+        const blob = new Blob(callAudioChunksRef.current, {
+          type: recorder.mimeType || "audio/webm",
+        });
         callStreamRef.current?.getTracks().forEach((track) => track.stop());
         callStreamRef.current = null;
         if (blob.size > 0) {
           callAudioSegmentsRef.current.push(blob);
-          if (isEndingCallRef.current || liveTranscriptProducedRef.current || !fallbackCaptureRef.current) {
+          if (
+            isEndingCallRef.current ||
+            liveTranscriptProducedRef.current ||
+            !fallbackCaptureRef.current
+          ) {
             callAudioStopResolverRef.current?.();
             callAudioStopResolverRef.current = null;
             return;
@@ -260,9 +285,13 @@ function VoiceCall() {
                 fallbackCaptureRef.current = false;
                 keepListeningRef.current = false;
                 setIsListening(false);
-                toast.error("Voice transcription is temporarily rate-limited. Try again in a moment or use browser speech recognition.");
+                toast.error(
+                  "Voice transcription is temporarily rate-limited. Try again in a moment or use browser speech recognition.",
+                );
               } else {
-                toast.error(error instanceof Error ? error.message : "Could not transcribe that voice turn.");
+                toast.error(
+                  error instanceof Error ? error.message : "Could not transcribe that voice turn.",
+                );
               }
             } finally {
               setIsTranscribingCall(false);
@@ -281,9 +310,11 @@ function VoiceCall() {
       if (fallbackCaptureRef.current) scheduleFallbackSegment();
       return true;
     } catch (error) {
-      toast.error(error instanceof DOMException && error.name === "NotAllowedError"
-        ? "Microphone access is required for the voice call."
-        : "Could not start microphone capture.");
+      toast.error(
+        error instanceof DOMException && error.name === "NotAllowedError"
+          ? "Microphone access is required for the voice call."
+          : "Could not start microphone capture.",
+      );
       return false;
     }
   }
@@ -369,14 +400,17 @@ function VoiceCall() {
         description = result.transcript.trim();
         setTranscript(description);
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Could not transcribe the voice recording.");
+        toast.error(
+          error instanceof Error ? error.message : "Could not transcribe the voice recording.",
+        );
       }
     }
-    const conversation = conversationRef.current.length > 0
-      ? conversationRef.current
-      : description
-        ? [{ role: "user" as const, content: description }]
-        : [];
+    const conversation =
+      conversationRef.current.length > 0
+        ? conversationRef.current
+        : description
+          ? [{ role: "user" as const, content: description }]
+          : [];
     if (!token) {
       navigate({ to: "/login" });
       return;
@@ -423,28 +457,34 @@ function VoiceCall() {
           </span>
         </div>
         <p className="mt-8 font-display text-2xl font-bold tabular-nums">{format(elapsed)}</p>
-        <p className="mt-2 min-h-12 max-w-sm text-center text-sm text-night-muted" aria-live="polite">
+        <p
+          className="mt-2 min-h-12 max-w-sm text-center text-sm text-night-muted"
+          aria-live="polite"
+        >
           {muted
             ? "Microphone muted"
-              : isTranscribingCall
-                ? "Transcribing your voice..."
+            : isTranscribingCall
+              ? "Transcribing your voice..."
               : isReplying
-              ? "HELIX is responding..."
-              : assistantReply
-                ? assistantReply
-              : !hasStartedListening
-                ? "Click the microphone to start speaking about your project."
-                : isWaiting
-              ? "Pause detected. Continue speaking within five seconds..."
-              : isListening
-                ? transcript || interimTranscript || "Listening for your project brief..."
-                : recognitionSupported
-                  ? "Microphone is paused"
-                  : "Voice recording is active. End the call when you are finished."}
+                ? "HELIX is responding..."
+                : assistantReply
+                  ? assistantReply
+                  : !hasStartedListening
+                    ? "Click the microphone to start speaking about your project."
+                    : isWaiting
+                      ? "Pause detected. Continue speaking within five seconds..."
+                      : isListening
+                        ? transcript || interimTranscript || "Listening for your project brief..."
+                        : recognitionSupported
+                          ? "Microphone is paused"
+                          : "Voice recording is active. End the call when you are finished."}
         </p>
 
         <div className="mt-8 w-full max-w-lg">
-          <label htmlFor="voice-transcript" className="mb-2 block text-xs font-medium text-night-muted">
+          <label
+            htmlFor="voice-transcript"
+            className="mb-2 block text-xs font-medium text-night-muted"
+          >
             Transcript
           </label>
           <Textarea
@@ -464,14 +504,24 @@ function VoiceCall() {
             className="min-h-28 border-night-border bg-white/5 text-night-foreground placeholder:text-night-muted"
           />
           <div className="mt-2 flex justify-end">
-            <Button type="button" size="sm" onClick={sendTypedTurn} disabled={isReplying || !transcript.trim()}>
+            <Button
+              type="button"
+              size="sm"
+              onClick={sendTypedTurn}
+              disabled={isReplying || !transcript.trim()}
+            >
               <Send className="mr-1.5 h-4 w-4" /> Send to HELIX
             </Button>
           </div>
-          <div className="mt-3 max-h-32 space-y-2 overflow-y-auto text-xs text-night-muted" aria-live="polite">
+          <div
+            className="mt-3 max-h-32 space-y-2 overflow-y-auto text-xs text-night-muted"
+            aria-live="polite"
+          >
             {messages.map((message, index) => (
               <p key={`${message.role}-${index}`}>
-                <span className="font-semibold text-night-foreground">{message.role === "user" ? "You" : "HELIX"}:</span>{" "}
+                <span className="font-semibold text-night-foreground">
+                  {message.role === "user" ? "You" : "HELIX"}:
+                </span>{" "}
                 {message.content}
               </p>
             ))}
@@ -515,8 +565,8 @@ function VoiceCall() {
       </div>
 
       <p className="max-w-sm text-center text-xs text-night-muted">
-        You can end the call at any time. HELIX will analyse the conversation and
-        produce a project summary for your approval.
+        You can end the call at any time. HELIX will analyse the conversation and produce a project
+        summary for your approval.
       </p>
     </div>
   );

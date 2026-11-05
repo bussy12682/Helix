@@ -4,8 +4,8 @@
  * model execution, output validation, automatic schema repair, and telemetry.
  */
 
-import { AGENT_CONTRACTS } from '../contracts.js';
-import { parseAndValidateAgentOutput, ValidationError } from '../schemas.js';
+import { AGENT_CONTRACTS } from "../contracts.js";
+import { parseAndValidateAgentOutput, ValidationError } from "../schemas.js";
 
 export class BaseAgent {
   constructor({ role, modelRouter, toolRegistry, observability }) {
@@ -26,9 +26,9 @@ export class BaseAgent {
     return `You are the ${this.contract.role} in HELIX AI Engineering Operating System.
 Purpose: ${this.contract.purpose}
 Responsibilities:
-${this.contract.responsibilities.map((r) => `- ${r}`).join('\n')}
+${this.contract.responsibilities.map((r) => `- ${r}`).join("\n")}
 Restrictions:
-${this.contract.restrictions.map((r) => `- ${r}`).join('\n')}
+${this.contract.restrictions.map((r) => `- ${r}`).join("\n")}
 
 MANDATORY OUTPUT FORMAT:
 You MUST respond with a single, strictly valid JSON object adhering to this schema:
@@ -60,7 +60,16 @@ Do not wrap your JSON in markdown unless necessary; return clean JSON.`;
   /**
    * Executes a task with automatic validation, schema repair loops, and tracing.
    */
-  async execute({ workflowId, projectId, taskId, taskTitle, context, maxRetries = 2, options = {}, onMeta = null }) {
+  async execute({
+    workflowId,
+    projectId,
+    taskId,
+    taskTitle,
+    context,
+    maxRetries = 2,
+    options = {},
+    onMeta = null,
+  }) {
     const span = this.observability.startSpan({
       workflowId,
       projectId,
@@ -70,15 +79,19 @@ Do not wrap your JSON in markdown unless necessary; return clean JSON.`;
     });
 
     const systemPrompt = this.getSystemInstructions();
-    const userPrompt = JSON.stringify({
-      taskId,
-      taskTitle,
-      context,
-    }, null, 2);
+    const userPrompt = JSON.stringify(
+      {
+        taskId,
+        taskTitle,
+        context,
+      },
+      null,
+      2,
+    );
 
     const messages = [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
     ];
 
     let attempt = 0;
@@ -97,9 +110,9 @@ Do not wrap your JSON in markdown unless necessary; return clean JSON.`;
         validatedOutput.task_id = taskId; // guarantee task_id aligns
 
         // Write created artifacts to the virtual workspace if tool is authorized
-        if (this.toolRegistry.isAuthorized(this.role, 'virtual_workspace_write')) {
+        if (this.toolRegistry.isAuthorized(this.role, "virtual_workspace_write")) {
           for (const artifact of validatedOutput.artifacts) {
-            await this.toolRegistry.executeTool(this.role, 'virtual_workspace_write', {
+            await this.toolRegistry.executeTool(this.role, "virtual_workspace_write", {
               projectId: projectId || context.project?.id || workflowId,
               filePath: artifact.path,
               content: artifact.content,
@@ -107,10 +120,16 @@ Do not wrap your JSON in markdown unless necessary; return clean JSON.`;
           }
         }
 
-        onMeta?.({ provider: result.provider, model: result.model, tier: result.tier, usage: result.usage, attempts: attempt });
+        onMeta?.({
+          provider: result.provider,
+          model: result.model,
+          tier: result.tier,
+          usage: result.usage,
+          attempts: attempt,
+        });
 
         this.observability.endSpan(span, {
-          status: 'completed',
+          status: "completed",
           model: result.model,
           provider: result.provider,
           usage: result.usage,
@@ -127,7 +146,7 @@ Do not wrap your JSON in markdown unless necessary; return clean JSON.`;
         if (attempt <= maxRetries) {
           // Push repair message into conversation for next attempt
           messages.push({
-            role: 'user',
+            role: "user",
             content: `Your previous output had validation errors: ${err.message}. Please fix the JSON output and ensure all required fields match the schema.`,
           });
         }
@@ -135,10 +154,15 @@ Do not wrap your JSON in markdown unless necessary; return clean JSON.`;
     }
 
     this.observability.endSpan(span, {
-      status: 'failed',
+      status: "failed",
       error: lastError,
     });
 
-    throw lastError || new ValidationError(`Agent ${this.role} failed to produce valid output after ${maxRetries} retries.`);
+    throw (
+      lastError ||
+      new ValidationError(
+        `Agent ${this.role} failed to produce valid output after ${maxRetries} retries.`,
+      )
+    );
   }
 }

@@ -4,8 +4,8 @@
  * Provides an event emitter for real-time SSE streaming to the frontend AI Office.
  */
 
-import { EventEmitter } from 'node:events';
-import { randomUUID } from 'node:crypto';
+import { EventEmitter } from "node:events";
+import { randomUUID } from "node:crypto";
 
 export class ObservabilityService extends EventEmitter {
   constructor() {
@@ -33,7 +33,7 @@ export class ObservabilityService extends EventEmitter {
       agentRole,
       taskTitle,
       startTime: Date.now(),
-      status: 'running',
+      status: "running",
       toolsCalled: [],
       model: null,
       provider: null,
@@ -42,7 +42,7 @@ export class ObservabilityService extends EventEmitter {
       artifactsCreated: [],
     };
 
-    this.emitEvent('span_started', span);
+    this.emitEvent("span_started", span);
     return span;
   }
 
@@ -52,25 +52,33 @@ export class ObservabilityService extends EventEmitter {
   recordToolCall(span, { toolName, args, result, durationMs }) {
     const record = {
       toolName,
-      args: typeof args === 'object' ? JSON.stringify(args).slice(0, 200) : String(args),
+      args: typeof args === "object" ? JSON.stringify(args).slice(0, 200) : String(args),
       durationMs,
       timestamp: new Date().toISOString(),
     };
     span.toolsCalled.push(record);
-    this.emitEvent('tool_called', { spanId: span.spanId, workflowId: span.workflowId, projectId: span.projectId, ...record });
+    this.emitEvent("tool_called", {
+      spanId: span.spanId,
+      workflowId: span.workflowId,
+      projectId: span.projectId,
+      ...record,
+    });
   }
 
   /**
    * Concludes a span with successful output or error.
    */
-  endSpan(span, { status = 'completed', model, provider, usage, error = null, artifacts = [] } = {}) {
+  endSpan(
+    span,
+    { status = "completed", model, provider, usage, error = null, artifacts = [] } = {},
+  ) {
     span.endTime = Date.now();
     span.durationMs = span.endTime - span.startTime;
     span.status = status;
     span.model = model || span.model;
     span.provider = provider || span.provider;
     span.usage = usage || null;
-    span.error = error ? (error.message || String(error)) : null;
+    span.error = error ? error.message || String(error) : null;
     span.artifactsCreated = (artifacts || []).map((a) => a.path || a.name);
 
     this.traces.push(span);
@@ -79,7 +87,7 @@ export class ObservabilityService extends EventEmitter {
     }
 
     this.onSpanCompleted?.(span);
-    this.emitEvent('span_completed', span);
+    this.emitEvent("span_completed", span);
     return span;
   }
 
@@ -93,7 +101,7 @@ export class ObservabilityService extends EventEmitter {
       timestamp: new Date().toISOString(),
       payload,
     };
-    this.emit('workflow_event', event);
+    this.emit("workflow_event", event);
     return event;
   }
 
@@ -110,8 +118,8 @@ export class ObservabilityService extends EventEmitter {
   getWorkflowMetrics(workflowId) {
     const workflowTraces = this.getTracesForWorkflow(workflowId);
     const totalDurationMs = workflowTraces.reduce((acc, t) => acc + t.durationMs, 0);
-    const completedCount = workflowTraces.filter((t) => t.status === 'completed').length;
-    const failedCount = workflowTraces.filter((t) => t.status === 'failed').length;
+    const completedCount = workflowTraces.filter((t) => t.status === "completed").length;
+    const failedCount = workflowTraces.filter((t) => t.status === "failed").length;
 
     return {
       workflowId,

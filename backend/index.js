@@ -1,12 +1,12 @@
-import http from 'node:http';
-import { existsSync } from 'node:fs';
+import http from "node:http";
+import { existsSync } from "node:fs";
 
-import { createApp } from './app.js';
-import { createNodeHandler } from './http-adapter.js';
-import { loadConfig } from './config.js';
+import { createApp } from "./app.js";
+import { createNodeHandler } from "./http-adapter.js";
+import { loadConfig } from "./config.js";
 
-const envFile = existsSync('.env.local') ? '.env.local' : '.env';
-if (typeof process.loadEnvFile === 'function' && existsSync(envFile)) {
+const envFile = existsSync(".env.local") ? ".env.local" : ".env";
+if (typeof process.loadEnvFile === "function" && existsSync(envFile)) {
   process.loadEnvFile(envFile);
 }
 
@@ -28,5 +28,5 @@ function shutdown(signal) {
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 5000).unref();
 }
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
