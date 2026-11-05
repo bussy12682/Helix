@@ -1,3 +1,7 @@
+/**
+ * Database configuration descriptor. Runtime persistence is provided by the atomic JSON file store
+ * in storage.js; DATABASE_URL is recorded for planning but no PostgreSQL adapter is implemented.
+ */
 export function createDatabaseFoundation(options = {}) {
   const config = {
     databaseUrl: options.databaseUrl ?? '',
@@ -6,7 +10,7 @@ export function createDatabaseFoundation(options = {}) {
 
   const state = {
     mode: config.databaseUrl ? 'postgres' : 'memory',
-    status: config.databaseUrl ? 'postgres-ready' : 'safe-memory',
+    status: config.databaseUrl ? 'postgres-not-implemented' : 'safe-memory',
     initialized: false,
     connection: null,
     schema: [],
@@ -40,8 +44,9 @@ export function createDatabaseFoundation(options = {}) {
       state.requiresExternalDatabase = false;
       state.safeFallbackEnabled = true;
     } else {
+      // No PostgreSQL adapter exists yet: persistence uses the JSON file store (HELIX_STORAGE_PATH).
       state.mode = 'postgres';
-      state.status = 'postgres-ready';
+      state.status = 'postgres-not-implemented';
       state.initialized = true;
       state.schema = ['users', 'projects', 'sessions', 'audit_events'];
       state.requiresExternalDatabase = true;

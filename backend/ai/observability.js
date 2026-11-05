@@ -10,18 +10,25 @@ import { randomUUID } from 'node:crypto';
 export class ObservabilityService extends EventEmitter {
   constructor() {
     super();
+    this.setMaxListeners(0); // one listener per connected SSE client
     this.traces = []; // in-memory trace buffer
     this.maxTraces = 1000;
+    this.onSpanCompleted = null;
+  }
+
+  hydrate(spans = []) {
+    this.traces = spans.slice(-this.maxTraces);
   }
 
   /**
    * Starts a new trace span for an agent task execution.
    */
-  startSpan({ workflowId, taskId, agentRole, taskTitle }) {
+  startSpan({ workflowId, projectId = null, taskId, agentRole, taskTitle }) {
     const spanId = `span_${randomUUID()}`;
     const span = {
       spanId,
       workflowId,
+      projectId,
       taskId,
       agentRole,
       taskTitle,
@@ -50,7 +57,7 @@ export class ObservabilityService extends EventEmitter {
       timestamp: new Date().toISOString(),
     };
     span.toolsCalled.push(record);
-    this.emitEvent('tool_called', { spanId: span.spanId, ...record });
+    this.emitEvent('tool_called', { spanId: span.spanId, workflowId: span.workflowId, projectId: span.projectId, ...record });
   }
 
   /**
@@ -71,6 +78,7 @@ export class ObservabilityService extends EventEmitter {
       this.traces.shift();
     }
 
+    this.onSpanCompleted?.(span);
     this.emitEvent('span_completed', span);
     return span;
   }

@@ -24,12 +24,69 @@ export const ROLE_TO_TIER_MAP = {
   [AGENT_ROLES.DOCUMENTATION_ENGINEER]: MODEL_TIERS.FAST,
 };
 
+const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
+const PLACEHOLDER_KEY = /^(your[-_]|replace[-_]|sk[-_]?your|change[-_]me)/i;
+
+export class AiProviderError extends Error {
+  constructor(message, { code = 'AI_PROVIDER_ERROR', status = null, provider = null, attempts = [] } = {}) {
+    super(message);
+    this.name = 'AiProviderError';
+    this.code = code;
+    this.status = status;
+    this.provider = provider;
+    this.attempts = attempts;
+  }
+}
+
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+    }, { once: true });
+  });
+}
+
 export class ModelRouter {
   constructor(config = {}) {
     this.config = config;
     this.defaultProvider = config.aiProvider || 'google';
     this.ollamaBaseUrl = (config.ollamaBaseUrl || process.env.OLLAMA_BASE_URL || 'http://localhost:11434').replace(/\/$/, '');
     this.mockMode = config.mockMode || process.env.HELIX_MOCK_AI === 'true';
+    this.fallbackProviders = (config.aiFallbackProviders ?? process.env.AI_FALLBACK_PROVIDERS ?? '')
+      .split(',').map((p) => p.trim()).filter(Boolean);
+    // Simulated output is never used to mask a failing real provider. It is only used when no
+    // provider is configured at all, and only if explicitly allowed (default: non-production).
+    this.allowMockFallback = config.allowMockFallback
+      ?? (process.env.HELIX_ALLOW_MOCK_FALLBACK
+        ? process.env.HELIX_ALLOW_MOCK_FALLBACK === 'true'
+        : process.env.NODE_ENV !== 'production');
+    this.maxRetries = Number(config.aiMaxRetries ?? process.env.AI_MAX_RETRIES ?? 2);
+    this.timeoutMs = Number(config.aiTimeoutMs ?? process.env.AI_TIMEOUT_MS ?? 120000);
+    this.retryBaseDelayMs = Number(config.aiRetryBaseDelayMs ?? 500);
+    this.fetchImpl = config.fetchImpl ?? ((...args) => fetch(...args));
+  }
+
+  hasUsableKey(provider) {
+    if (provider === 'ollama') return true;
+    const key = this.getApiKey(provider);
+    return Boolean(key) && !PLACEHOLDER_KEY.test(key);
+  }
+
+  /**
+   * Describes routing configuration for health/status endpoints (no secrets).
+   */
+  getStatus() {
+    const chain = [this.defaultProvider, ...this.fallbackProviders];
+    return {
+      mode: this.mockMode ? 'mock' : 'live',
+      primaryProvider: this.defaultProvider,
+      fallbackProviders: this.fallbackProviders,
+      configuredProviders: chain.filter((p) => this.hasUsableKey(p)),
+      mockFallbackAllowed: this.allowMockFallback,
+    };
   }
 
   /**
@@ -92,80 +149,190 @@ export class ModelRouter {
   }
 
   /**
-   * Invokes an AI completion request with automatic model routing, retries, and fallback.
+   * Invokes a completion with role-based routing, per-provider retries with exponential backoff,
+   * timeouts, cancellation (options.signal), optional token streaming (options.onToken), and an
+   * explicit fallback provider chain (AI_FALLBACK_PROVIDERS).
    */
   async complete({ agentRole, messages, temperature = 0.2, options = {} }) {
     if (this.mockMode || options.forceMock) {
-      return this.generateMockResponse(agentRole, messages);
+      return this.emitMock(this.generateMockResponse(agentRole, messages), options);
     }
 
-    const resolution = this.resolveModel(agentRole, options);
-    const hasPlaceholderKey = /^(your[-_]|replace[-_]|sk[-_]?your)/i.test(resolution.apiKey ?? '');
+    const chain = [...new Set([options.provider || this.defaultProvider, ...this.fallbackProviders])];
+    const candidates = chain.filter((provider) => this.hasUsableKey(provider));
 
-    // If provider requires an API key and it's missing or placeholder, attempt Ollama or fallback to mock
-    if ((resolution.provider !== 'ollama' && (!resolution.apiKey || hasPlaceholderKey))) {
-      // Try local Ollama if available
+    if (candidates.length === 0) {
+      // Nothing configured: try a local Ollama server, then (if allowed) clearly-labelled mock output.
       try {
-        const ollamaRes = await this.tryOllama(agentRole, messages, temperature);
-        if (ollamaRes) return ollamaRes;
+        const ollama = await this.tryOllama(agentRole, messages, temperature);
+        if (ollama?.content) return ollama;
       } catch {
-        // Fallback to mock if local ollama is also not available
+        // Ollama not reachable.
       }
-      return this.generateMockResponse(agentRole, messages);
+      if (this.allowMockFallback) {
+        return this.emitMock(this.generateMockResponse(agentRole, messages), options);
+      }
+      throw new AiProviderError(
+        `No AI provider is configured (tried: ${chain.join(', ')}). Set an API key or enable HELIX_MOCK_AI.`,
+        { code: 'AI_NOT_CONFIGURED' },
+      );
     }
 
-    const payload = {
-      model: resolution.model,
-      temperature,
-      response_format: { type: 'json_object' },
-      messages,
-    };
+    const attempts = [];
+    for (const provider of candidates) {
+      const resolution = this.resolveModel(agentRole, { ...options, provider });
+      try {
+        return await this.callWithRetries(resolution, { messages, temperature, options, attempts });
+      } catch (error) {
+        if (error.name === 'AbortError' || options.signal?.aborted) throw error;
+        console.warn(`[ModelRouter] Provider ${provider} failed: ${error.message}`);
+      }
+    }
 
-    const headers = {
-      'content-type': 'application/json',
-      authorization: `Bearer ${resolution.apiKey}`,
-    };
+    const last = attempts.at(-1);
+    throw new AiProviderError(
+      `All AI providers failed (${attempts.map((a) => `${a.provider}#${a.attempt}: ${a.error}`).join('; ')})`,
+      { code: 'AI_PROVIDER_FAILED', status: last?.status ?? null, provider: last?.provider ?? null, attempts },
+    );
+  }
 
+  async callWithRetries(resolution, { messages, temperature, options, attempts }) {
+    let lastError;
+    for (let attempt = 1; attempt <= this.maxRetries + 1; attempt += 1) {
+      try {
+        return await this.callProvider(resolution, { messages, temperature, options });
+      } catch (error) {
+        lastError = error;
+        attempts.push({ provider: resolution.provider, attempt, status: error.status ?? null, error: error.message });
+        if (error.name === 'AbortError' && options.signal?.aborted) throw error;
+        const retryable = error.retryable ?? true;
+        if (!retryable || attempt > this.maxRetries) break;
+        const backoff = error.retryAfterMs ?? this.retryBaseDelayMs * 2 ** (attempt - 1);
+        await sleep(Math.min(backoff, 10000), options.signal);
+      }
+    }
+    throw lastError;
+  }
+
+  async callProvider(resolution, { messages, temperature, options }) {
+    const stream = typeof options.onToken === 'function';
+    const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
+    const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
     const startTime = Date.now();
+
+    let response;
     try {
-      const response = await fetch(`${resolution.baseUrl}/chat/completions`, {
+      response = await this.fetchImpl(`${resolution.baseUrl}/chat/completions`, {
         method: 'POST',
-        headers,
-        body: JSON.stringify(payload),
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${resolution.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: resolution.model,
+          temperature,
+          response_format: { type: 'json_object' },
+          messages,
+          ...(stream ? { stream: true } : {}),
+        }),
+        signal,
       });
-
-      if (!response.ok) {
-        // If 429 or 403, fallback to mock or Ollama
-        if (response.status === 429 || response.status === 403) {
-          console.warn(`[ModelRouter] Provider returned ${response.status}. Falling back to mock generator.`);
-          return this.generateMockResponse(agentRole, messages);
-        }
-        throw new Error(`AI Provider ${resolution.provider} returned HTTP ${response.status}`);
-      }
-
-      const json = await response.json();
-      const content = json?.choices?.[0]?.message?.content;
-      if (!content) {
-        throw new Error('AI Provider returned empty message content');
-      }
-
-      return {
-        content,
-        provider: resolution.provider,
-        model: resolution.model,
-        tier: resolution.tier,
-        durationMs: Date.now() - startTime,
-        usage: json.usage || null,
-      };
     } catch (error) {
-      console.warn(`[ModelRouter] Error calling ${resolution.provider}: ${error.message}. Using fallback.`);
-      return this.generateMockResponse(agentRole, messages);
+      if (options.signal?.aborted) throw error;
+      const wrapped = new AiProviderError(
+        timeoutSignal.aborted ? `Request timed out after ${this.timeoutMs}ms` : `Network error: ${error.message}`,
+        { code: 'AI_PROVIDER_UNAVAILABLE', provider: resolution.provider },
+      );
+      wrapped.retryable = true;
+      throw wrapped;
     }
+
+    if (!response.ok) {
+      const detail = (await response.text().catch(() => '')).slice(0, 300);
+      const error = new AiProviderError(
+        `${resolution.provider} returned HTTP ${response.status}${detail ? `: ${detail}` : ''}`,
+        { code: 'AI_PROVIDER_FAILED', status: response.status, provider: resolution.provider },
+      );
+      error.retryable = RETRYABLE_STATUS.has(response.status);
+      const retryAfter = Number(response.headers.get('retry-after'));
+      if (Number.isFinite(retryAfter) && retryAfter > 0) error.retryAfterMs = retryAfter * 1000;
+      throw error;
+    }
+
+    let content = '';
+    let usage = null;
+    const contentType = response.headers.get('content-type') || '';
+    if (stream && contentType.includes('text/event-stream') && response.body) {
+      ({ content, usage } = await this.readStream(response.body, options.onToken));
+    } else {
+      const json = await response.json();
+      content = json?.choices?.[0]?.message?.content ?? '';
+      usage = json.usage || null;
+      if (stream && content) options.onToken(content);
+    }
+
+    if (!content) {
+      const error = new AiProviderError('AI provider returned empty message content', {
+        code: 'AI_EMPTY_RESPONSE', provider: resolution.provider,
+      });
+      error.retryable = true;
+      throw error;
+    }
+
+    return {
+      content,
+      provider: resolution.provider,
+      model: resolution.model,
+      tier: resolution.tier,
+      durationMs: Date.now() - startTime,
+      usage,
+    };
+  }
+
+  /**
+   * Parses an OpenAI-compatible SSE completion stream, forwarding content deltas.
+   */
+  async readStream(body, onToken) {
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let content = '';
+    let usage = null;
+    for await (const chunk of body) {
+      buffer += decoder.decode(chunk, { stream: true });
+      let newline;
+      while ((newline = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (data === '[DONE]') return { content, usage };
+        try {
+          const json = JSON.parse(data);
+          const delta = json?.choices?.[0]?.delta?.content;
+          if (delta) {
+            content += delta;
+            onToken(delta);
+          }
+          if (json.usage) usage = json.usage;
+        } catch {
+          // Ignore keep-alives and partial frames.
+        }
+      }
+    }
+    return { content, usage };
+  }
+
+  emitMock(result, options = {}) {
+    if (typeof options.onToken === 'function') options.onToken(result.content);
+    return result;
   }
 
   async tryOllama(agentRole, messages, temperature) {
     const resolution = this.resolveModel(agentRole, { provider: 'ollama' });
-    const response = await fetch(`${resolution.baseUrl}/chat/completions`, {
+    const probe = await this.fetchImpl(`${this.ollamaBaseUrl}/api/tags`, { signal: AbortSignal.timeout(1500) });
+    if (!probe.ok) return null;
+    const startTime = Date.now();
+    const response = await this.fetchImpl(`${resolution.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -174,7 +341,7 @@ export class ModelRouter {
         response_format: { type: 'json_object' },
         messages,
       }),
-      signal: AbortSignal.timeout(2000), // Quick check
+      signal: AbortSignal.timeout(this.timeoutMs),
     });
     if (!response.ok) return null;
     const json = await response.json();
@@ -183,7 +350,7 @@ export class ModelRouter {
       provider: 'ollama',
       model: resolution.model,
       tier: resolution.tier,
-      durationMs: 50,
+      durationMs: Date.now() - startTime,
       usage: json.usage || null,
     };
   }

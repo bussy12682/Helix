@@ -60,9 +60,10 @@ Do not wrap your JSON in markdown unless necessary; return clean JSON.`;
   /**
    * Executes a task with automatic validation, schema repair loops, and tracing.
    */
-  async execute({ workflowId, taskId, taskTitle, context, maxRetries = 2, options = {} }) {
+  async execute({ workflowId, projectId, taskId, taskTitle, context, maxRetries = 2, options = {}, onMeta = null }) {
     const span = this.observability.startSpan({
       workflowId,
+      projectId,
       taskId,
       agentRole: this.role,
       taskTitle,
@@ -99,12 +100,14 @@ Do not wrap your JSON in markdown unless necessary; return clean JSON.`;
         if (this.toolRegistry.isAuthorized(this.role, 'virtual_workspace_write')) {
           for (const artifact of validatedOutput.artifacts) {
             await this.toolRegistry.executeTool(this.role, 'virtual_workspace_write', {
-              projectId: context.project?.id || workflowId,
+              projectId: projectId || context.project?.id || workflowId,
               filePath: artifact.path,
               content: artifact.content,
             });
           }
         }
+
+        onMeta?.({ provider: result.provider, model: result.model, tier: result.tier, usage: result.usage, attempts: attempt });
 
         this.observability.endSpan(span, {
           status: 'completed',
@@ -117,6 +120,8 @@ Do not wrap your JSON in markdown unless necessary; return clean JSON.`;
         return validatedOutput;
       } catch (err) {
         lastError = err;
+        // Provider/transport failures were already retried by the router; only schema errors are repairable here.
+        if (!(err instanceof ValidationError)) break;
         console.warn(`[Agent ${this.role}] Attempt ${attempt} failed: ${err.message}`);
 
         if (attempt <= maxRetries) {

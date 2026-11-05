@@ -36,7 +36,7 @@ test('database foundation initializes in a safe mode when no database is configu
   assert.equal(typeof foundation.close, 'function');
 });
 
-test('database foundation exposes postgres-ready metadata for configured deployments', async () => {
+test('database foundation reports that a configured PostgreSQL URL is not yet implemented', async () => {
   const foundation = createDatabaseFoundation({
     databaseUrl: 'postgresql://helix:helix@localhost:5432/helix_test',
     nodeEnv: 'production',
@@ -49,7 +49,7 @@ test('database foundation exposes postgres-ready metadata for configured deploym
   assert.ok(state.schema.includes('projects'));
   assert.equal(state.requiresExternalDatabase, true);
   assert.equal(state.safeFallbackEnabled, false);
-  assert.equal(typeof state.status, 'string');
+  assert.equal(state.status, 'postgres-not-implemented');
 });
 
 test('project storage survives a backend restart when a storage path is configured', () => {

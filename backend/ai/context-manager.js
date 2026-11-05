@@ -7,9 +7,54 @@
 import { AGENT_ROLES } from './contracts.js';
 
 export class ContextManager {
-  constructor() {
+  constructor({ onChange = null } = {}) {
     // In-memory workspace cache indexed by projectId
     this.projectWorkspaces = new Map();
+    this.onChange = onChange;
+  }
+
+  setPersistence(onChange) {
+    this.onChange = onChange;
+  }
+
+  notifyChange(projectId) {
+    if (!this.onChange) return;
+    const ws = this.projectWorkspaces.get(projectId);
+    if (ws) this.onChange(this.serializeWorkspace(ws));
+  }
+
+  serializeWorkspace(ws) {
+    return { ...ws, artifacts: [...ws.artifacts.values()] };
+  }
+
+  /**
+   * Restores persisted workspaces (artifacts stored as arrays) into memory.
+   */
+  hydrate(workspaces = []) {
+    for (const ws of workspaces) {
+      if (!ws?.projectId) continue;
+      const artifacts = new Map();
+      for (const artifact of ws.artifacts ?? []) artifacts.set(artifact.path, artifact);
+      this.projectWorkspaces.set(ws.projectId, {
+        approvedDecisions: [],
+        reviewFindings: [],
+        taskHistory: [],
+        ...ws,
+        artifacts,
+      });
+    }
+  }
+
+  /**
+   * Refreshes brief fields (name, description, features, stack) after a project is edited.
+   */
+  updateProjectInfo(projectId, data = {}) {
+    const ws = this.projectWorkspaces.get(projectId);
+    if (!ws) return;
+    for (const key of ['name', 'description', 'keyFeatures', 'techStack']) {
+      if (data[key] !== undefined) ws[key] = data[key];
+    }
+    this.notifyChange(projectId);
   }
 
   /**
@@ -52,6 +97,7 @@ export class ContextManager {
     };
 
     ws.artifacts.set(path, record);
+    this.notifyChange(projectId);
     return record;
   }
 
@@ -72,6 +118,7 @@ export class ContextManager {
       ...decision,
       timestamp: new Date().toISOString(),
     });
+    this.notifyChange(projectId);
   }
 
   /**
@@ -82,6 +129,7 @@ export class ContextManager {
     const ws = this.getOrCreateWorkspace(projectId);
 
     const baseProjectInfo = {
+      id: projectId,
       name: ws.name,
       description: ws.description,
       keyFeatures: ws.keyFeatures,
