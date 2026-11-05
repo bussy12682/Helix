@@ -67,7 +67,8 @@ const agents = [
     deliverable: "PRD & User Stories",
     icon: FileText,
     color: "from-blue-500/20 to-cyan-500/20 text-cyan-400 border-cyan-500/30",
-    description: "Transforms user visions into structured PRDs, acceptance criteria, personas, and roadmap milestones.",
+    description:
+      "Transforms user visions into structured PRDs, acceptance criteria, personas, and roadmap milestones.",
     snippet: `## 1. Executive Summary\nAutonomous Multi-Vendor Marketplace with real-time checkout & inventory tracking.\n\n## 2. User Stories\n- As a shopper, I can filter by tags and purchase items with Stripe.\n- As a vendor, I can manage inventory and view payouts.`,
   },
   {
@@ -78,7 +79,8 @@ const agents = [
     deliverable: "C4 Architecture & OpenAPI",
     icon: Cpu,
     color: "from-purple-500/20 to-violet-500/20 text-purple-400 border-purple-500/30",
-    description: "Designs system topology, component interactions, database models, and OpenAPI 3.1 contracts.",
+    description:
+      "Designs system topology, component interactions, database models, and OpenAPI 3.1 contracts.",
     snippet: `openapi: 3.1.0\ninfo:\n  title: Helix Core Service API\n  version: 1.0.0\npaths:\n  /api/v1/orders:\n    post:\n      summary: Create new checkout session\n      responses:\n        '201':\n          description: Order registered`,
   },
   {
@@ -89,7 +91,8 @@ const agents = [
     deliverable: "PostgreSQL DDL & Migrations",
     icon: Database,
     color: "from-amber-500/20 to-orange-500/20 text-amber-400 border-amber-500/30",
-    description: "Generates production-grade PostgreSQL schemas, foreign keys, B-tree indexes, and rollback migrations.",
+    description:
+      "Generates production-grade PostgreSQL schemas, foreign keys, B-tree indexes, and rollback migrations.",
     snippet: `CREATE TABLE orders (\n  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n  user_id UUID REFERENCES users(id) ON DELETE CASCADE,\n  amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),\n  status VARCHAR(32) NOT NULL DEFAULT 'pending',\n  created_at TIMESTAMPTZ DEFAULT NOW()\n);\nCREATE INDEX idx_orders_user ON orders(user_id);`,
   },
   {
@@ -100,7 +103,8 @@ const agents = [
     deliverable: "REST/WebSocket Services",
     icon: Server,
     color: "from-emerald-500/20 to-green-500/20 text-emerald-400 border-emerald-500/30",
-    description: "Implements domain logic, route handlers, database repositories, error middlewares, and auth security.",
+    description:
+      "Implements domain logic, route handlers, database repositories, error middlewares, and auth security.",
     snippet: `export async function handleCreateOrder({ req, db, user }) {\n  const { items, total } = await req.json();\n  const order = await db.orders.create({\n    userId: user.id,\n    amountCents: total,\n    status: 'processing'\n  });\n  return Response.json({ success: true, orderId: order.id }, { status: 201 });\n}`,
   },
   {
@@ -111,7 +115,8 @@ const agents = [
     deliverable: "React & Tailwind UI",
     icon: Code2,
     color: "from-pink-500/20 to-rose-500/20 text-pink-400 border-pink-500/30",
-    description: "Crafts accessible, responsive React interfaces with state management, animations, and Tailwind styling.",
+    description:
+      "Crafts accessible, responsive React interfaces with state management, animations, and Tailwind styling.",
     snippet: `export function CheckoutPanel({ total, onConfirm }) {\n  const [loading, setLoading] = useState(false);\n  return (\n    <div className="rounded-2xl border border-white/10 bg-white/5 p-6 backdrop-blur">\n      <h3 className="text-lg font-semibold">Order Summary</h3>\n      <p className="mt-2 text-2xl font-bold">\${(total / 100).toFixed(2)}</p>\n      <Button onClick={onConfirm} className="w-full mt-4">Confirm Payment</Button>\n    </div>\n  );\n}`,
   },
   {
@@ -122,7 +127,8 @@ const agents = [
     deliverable: "Unit & E2E Test Suite",
     icon: CheckCircle2,
     color: "from-indigo-500/20 to-blue-500/20 text-indigo-400 border-indigo-500/30",
-    description: "Builds comprehensive test suites, edge case validations, and triggers automated repair loops if tests fail.",
+    description:
+      "Builds comprehensive test suites, edge case validations, and triggers automated repair loops if tests fail.",
     snippet: `test('Order creation rejects invalid amounts and calculates taxes', async () => {\n  const res = await client.post('/api/v1/orders', { body: { items: [], total: -50 } });\n  assert.equal(res.status, 400);\n  assert.equal(res.body.error.code, 'INVALID_AMOUNT');\n});`,
   },
   {
@@ -133,7 +139,8 @@ const agents = [
     deliverable: "Docker & CI/CD Pipelines",
     icon: Cloud,
     color: "from-sky-500/20 to-blue-500/20 text-sky-400 border-sky-500/30",
-    description: "Produces multi-stage container builds, GitHub Actions pipelines, and zero-downtime deployment scripts.",
+    description:
+      "Produces multi-stage container builds, GitHub Actions pipelines, and zero-downtime deployment scripts.",
     snippet: `FROM node:20-alpine AS builder\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci\nCOPY . .\nRUN npm run build\n\nFROM node:20-alpine AS runner\nWORKDIR /app\nCOPY --from=builder /app/dist ./dist\nCMD ["node", "dist/server.js"]`,
   },
   {
@@ -144,7 +151,8 @@ const agents = [
     deliverable: "SAST & Threat Audit",
     icon: Shield,
     color: "from-red-500/20 to-orange-500/20 text-red-400 border-red-500/30",
-    description: "Audits code for OWASP Top 10 vulnerabilities, injection risks, secret leaks, and security compliance.",
+    description:
+      "Audits code for OWASP Top 10 vulnerabilities, injection risks, secret leaks, and security compliance.",
     snippet: `{\n  "auditDate": "2026-09-21",\n  "status": "APPROVED",\n  "owaspScanned": ["Injection", "Broken Auth", "SSRF", "Secrets"],\n  "vulnerabilities": [],\n  "recommendations": ["Enforce strict Content Security Policy headers."]\n}`,
   },
   {
@@ -155,7 +163,8 @@ const agents = [
     deliverable: "SLOs & Health Runbooks",
     icon: Activity,
     color: "from-teal-500/20 to-emerald-500/20 text-teal-400 border-teal-500/30",
-    description: "Instruments real-time Prometheus metrics, error budgets, health checks, and self-healing runbooks.",
+    description:
+      "Instruments real-time Prometheus metrics, error budgets, health checks, and self-healing runbooks.",
     snippet: `slo:\n  service: helix-core\n  availability_target: 99.95%\n  latency_p99_ms: 150\ntelemetry:\n  prometheus_scrape: "/metrics"\n  health_endpoint: "/api/v1/health"\n  auto_healing: enabled`,
   },
 ];
@@ -223,7 +232,7 @@ const faqs = [
 ];
 
 function Landing() {
-  const [selectedAgent, setSelectedAgent] = useState(agents[0]);
+  const [selectedAgent, setSelectedAgent] = useState(agents[0]!);
   const [openFaq, setOpenFaq] = useState<number | null>(0);
   const [isDemoLoading, setIsDemoLoading] = useState(false);
   const navigate = useNavigate();
@@ -270,7 +279,10 @@ function Landing() {
             <a href="#pricing" className="transition hover:text-night-foreground">
               Pricing
             </a>
-            <Link to="/office" className="transition hover:text-night-foreground flex items-center gap-1">
+            <Link
+              to="/office"
+              className="transition hover:text-night-foreground flex items-center gap-1"
+            >
               Live Office <ExternalLink className="h-3 w-3" />
             </Link>
           </nav>
@@ -283,13 +295,20 @@ function Landing() {
               disabled={isDemoLoading}
               className="border-primary/40 bg-primary/10 text-primary hover:bg-primary/20 hover:text-primary font-medium text-xs cursor-pointer"
             >
-              {isDemoLoading ? "Entering..." : (
+              {isDemoLoading ? (
+                "Entering..."
+              ) : (
                 <span className="flex items-center gap-1">
                   <Zap className="h-3.5 w-3.5 fill-current" /> Demo Sign In
                 </span>
               )}
             </Button>
-            <Button asChild variant="ghost" size="sm" className="text-night-muted hover:text-night-foreground hover:bg-white/5">
+            <Button
+              asChild
+              variant="ghost"
+              size="sm"
+              className="text-night-muted hover:text-night-foreground hover:bg-white/5"
+            >
               <Link to="/login">Sign in</Link>
             </Button>
             <Button asChild size="sm" className="bg-primary hover:bg-primary/90 shadow-glow">
@@ -323,13 +342,17 @@ function Landing() {
               </h1>
 
               <p className="mt-6 max-w-xl text-base sm:text-lg leading-relaxed text-night-muted">
-                HELIX coordinates nine specialized AI agents — from Product Managers and System Architects
-                to Database, Backend, Frontend, QA, Security, DevOps, and SREs — turning a single idea
-                into production-ready software with structured human checkpoints.
+                HELIX coordinates nine specialized AI agents — from Product Managers and System
+                Architects to Database, Backend, Frontend, QA, Security, DevOps, and SREs — turning
+                a single idea into production-ready software with structured human checkpoints.
               </p>
 
               <div className="mt-8 flex flex-wrap items-center gap-3.5">
-                <Button asChild size="lg" className="bg-primary hover:bg-primary/90 text-sm font-semibold shadow-glow px-6">
+                <Button
+                  asChild
+                  size="lg"
+                  className="bg-primary hover:bg-primary/90 text-sm font-semibold shadow-glow px-6"
+                >
                   <Link to="/signup">
                     Deploy AI Workforce <ArrowRight className="ml-2 h-4 w-4" />
                   </Link>
@@ -345,7 +368,12 @@ function Landing() {
                   <Zap className="mr-2 h-4 w-4 text-primary fill-primary" /> 1-Click Live Demo
                 </Button>
 
-                <Button asChild size="lg" variant="ghost" className="text-night-muted hover:text-night-foreground hover:bg-white/5 text-sm">
+                <Button
+                  asChild
+                  size="lg"
+                  variant="ghost"
+                  className="text-night-muted hover:text-night-foreground hover:bg-white/5 text-sm"
+                >
                   <Link to="/office">
                     <PlayCircle className="mr-2 h-4 w-4" /> View AI Office
                   </Link>
@@ -378,10 +406,14 @@ function Landing() {
                     <span className="h-3 w-3 rounded-full bg-yellow-500/80" />
                     <span className="h-3 w-3 rounded-full bg-green-500/80" />
                     <span className="ml-2 font-mono text-xs text-night-muted flex items-center gap-1.5">
-                      <Terminal className="h-3.5 w-3.5 text-primary" /> helix-orchestrator :: live-dispatch
+                      <Terminal className="h-3.5 w-3.5 text-primary" /> helix-orchestrator ::
+                      live-dispatch
                     </span>
                   </div>
-                  <Badge variant="outline" className="border-emerald-500/40 bg-emerald-500/10 text-[10px] text-emerald-400">
+                  <Badge
+                    variant="outline"
+                    className="border-emerald-500/40 bg-emerald-500/10 text-[10px] text-emerald-400"
+                  >
                     Active Workflow
                   </Badge>
                 </div>
@@ -397,7 +429,9 @@ function Landing() {
                         <a.icon className="h-4 w-4 text-primary" />
                         <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
                       </div>
-                      <p className="mt-2 text-xs font-semibold text-night-foreground truncate">{a.name}</p>
+                      <p className="mt-2 text-xs font-semibold text-night-foreground truncate">
+                        {a.name}
+                      </p>
                       <p className="text-[10px] text-night-muted truncate">{a.role}</p>
                       <span className="mt-2 inline-block rounded bg-white/5 px-1.5 py-0.5 font-mono text-[9px] text-primary">
                         done · 100%
@@ -412,7 +446,9 @@ function Landing() {
                     <ShieldCheck className="h-4 w-4 text-amber-400 shrink-0" />
                     <div>
                       <p className="font-semibold text-amber-300">Human Approval Gate #1</p>
-                      <p className="text-[11px] text-amber-200/70">PRD & Database Architecture ready for review</p>
+                      <p className="text-[11px] text-amber-200/70">
+                        PRD & Database Architecture ready for review
+                      </p>
                     </div>
                   </div>
                   <Button
@@ -449,8 +485,8 @@ function Landing() {
               Meet Your 9 Specialized AI Engineers
             </h2>
             <p className="mt-3 text-sm sm:text-base text-night-muted">
-              Unlike generic assistants, each HELIX agent operates under an explicit contract, typed schema,
-              and designated model tier optimized for their specific craft.
+              Unlike generic assistants, each HELIX agent operates under an explicit contract, typed
+              schema, and designated model tier optimized for their specific craft.
             </p>
           </div>
 
@@ -470,13 +506,19 @@ function Landing() {
                         : "border-night-border bg-night/40 hover:border-night-border/90 hover:bg-night-soft/60"
                     }`}
                   >
-                    <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border ${agent.color}`}>
+                    <div
+                      className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border ${agent.color}`}
+                    >
                       <Icon className="h-5 w-5" />
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between">
-                        <span className="text-sm font-semibold text-night-foreground">{agent.name}</span>
-                        <span className="text-[10px] font-mono text-night-muted">{agent.deliverable}</span>
+                        <span className="text-sm font-semibold text-night-foreground">
+                          {agent.name}
+                        </span>
+                        <span className="text-[10px] font-mono text-night-muted">
+                          {agent.deliverable}
+                        </span>
                       </div>
                       <p className="text-xs text-night-muted truncate">{agent.role}</p>
                     </div>
@@ -489,13 +531,18 @@ function Landing() {
             <div className="rounded-3xl border border-night-border bg-night/80 p-8 shadow-2xl backdrop-blur-xl">
               <div className="flex flex-wrap items-center justify-between gap-4 border-b border-night-border pb-6">
                 <div className="flex items-center gap-4">
-                  <div className={`flex h-14 w-14 items-center justify-center rounded-2xl border ${selectedAgent.color}`}>
+                  <div
+                    className={`flex h-14 w-14 items-center justify-center rounded-2xl border ${selectedAgent.color}`}
+                  >
                     <selectedAgent.icon className="h-7 w-7" />
                   </div>
                   <div>
                     <div className="flex items-center gap-2">
                       <h3 className="font-display text-2xl font-bold">{selectedAgent.name}</h3>
-                      <Badge variant="outline" className="border-primary/40 bg-primary/10 text-primary text-xs">
+                      <Badge
+                        variant="outline"
+                        className="border-primary/40 bg-primary/10 text-primary text-xs"
+                      >
                         {selectedAgent.role}
                       </Badge>
                     </div>
@@ -503,7 +550,12 @@ function Landing() {
                   </div>
                 </div>
 
-                <Button asChild size="sm" variant="outline" className="border-night-border bg-white/5 hover:bg-white/10">
+                <Button
+                  asChild
+                  size="sm"
+                  variant="outline"
+                  className="border-night-border bg-white/5 hover:bg-white/10"
+                >
                   <Link to="/office">Interact in Office</Link>
                 </Button>
               </div>
@@ -520,9 +572,12 @@ function Landing() {
               <div className="mt-6">
                 <div className="flex items-center justify-between">
                   <h4 className="text-xs font-semibold uppercase tracking-wider text-night-muted flex items-center gap-1.5">
-                    <Terminal className="h-3.5 w-3.5 text-primary" /> Generated Artifact Output Preview
+                    <Terminal className="h-3.5 w-3.5 text-primary" /> Generated Artifact Output
+                    Preview
                   </h4>
-                  <span className="text-[11px] font-mono text-primary">{selectedAgent.deliverable}</span>
+                  <span className="text-[11px] font-mono text-primary">
+                    {selectedAgent.deliverable}
+                  </span>
                 </div>
                 <pre className="mt-3 overflow-x-auto rounded-xl border border-night-border bg-black/60 p-4 font-mono text-xs leading-relaxed text-emerald-400">
                   <code>{selectedAgent.snippet}</code>
@@ -531,7 +586,9 @@ function Landing() {
 
               <div className="mt-6 grid grid-cols-2 gap-4 border-t border-night-border pt-6 text-xs text-night-muted">
                 <div>
-                  <span className="font-semibold text-night-foreground">Communication Channel:</span>
+                  <span className="font-semibold text-night-foreground">
+                    Communication Channel:
+                  </span>
                   <p className="mt-0.5">Structured JSON Envelope & Memory Context</p>
                 </div>
                 <div>
@@ -555,8 +612,8 @@ function Landing() {
               Autonomous DAG with Human Checkpoints
             </h2>
             <p className="mt-3 text-sm sm:text-base text-night-muted">
-              HELIX executes tasks through a dependency graph with self-healing feedback loops
-              and mandatory review gates so you retain complete control over your code.
+              HELIX executes tasks through a dependency graph with self-healing feedback loops and
+              mandatory review gates so you retain complete control over your code.
             </p>
           </div>
 
@@ -571,12 +628,18 @@ function Landing() {
                     <span className="font-display text-xl font-bold text-primary">{wf.step}</span>
                     <div>
                       <div className="flex items-center gap-2">
-                        <span className="text-xs font-semibold uppercase text-night-muted">{wf.phase}</span>
+                        <span className="text-xs font-semibold uppercase text-night-muted">
+                          {wf.phase}
+                        </span>
                         <span className="text-xs text-night-border">•</span>
                         <span className="text-xs font-medium text-primary">{wf.agent}</span>
                       </div>
-                      <h3 className="mt-1 font-display text-lg font-bold text-night-foreground">{wf.title}</h3>
-                      <p className="mt-1 max-w-3xl text-xs sm:text-sm text-night-muted">{wf.desc}</p>
+                      <h3 className="mt-1 font-display text-lg font-bold text-night-foreground">
+                        {wf.title}
+                      </h3>
+                      <p className="mt-1 max-w-3xl text-xs sm:text-sm text-night-muted">
+                        {wf.desc}
+                      </p>
                     </div>
                   </div>
 
@@ -608,7 +671,8 @@ function Landing() {
               Production-Grade Artifacts, Not Just Chat
             </h2>
             <p className="mt-3 text-sm sm:text-base text-night-muted">
-              Every workflow step generates concrete, production-ready deliverables saved to your repository.
+              Every workflow step generates concrete, production-ready deliverables saved to your
+              repository.
             </p>
           </div>
 
@@ -616,7 +680,9 @@ function Landing() {
             <div className="flex flex-wrap items-center justify-between border-b border-night-border bg-black/40 px-6 py-3">
               <div className="flex items-center gap-2">
                 <FileCode2 className="h-4 w-4 text-primary" />
-                <span className="font-mono text-xs text-night-foreground">helix-project-output</span>
+                <span className="font-mono text-xs text-night-foreground">
+                  helix-project-output
+                </span>
               </div>
               <div className="flex items-center gap-3 text-xs text-night-muted font-mono">
                 <span>9 Files Generated</span>
@@ -650,18 +716,48 @@ function Landing() {
                 <div className="md:col-span-3 rounded-xl border border-night-border bg-black/70 p-5 font-mono text-xs leading-relaxed text-night-muted">
                   <p className="text-primary"># Product Requirements Document (PRD)</p>
                   <p className="text-night-foreground mt-2">## 1. Objective</p>
-                  <p>Deliver an autonomous incident remediation engine that ingests observability alerts and executes canary playbooks.</p>
+                  <p>
+                    Deliver an autonomous incident remediation engine that ingests observability
+                    alerts and executes canary playbooks.
+                  </p>
                   <p className="text-night-foreground mt-3">## 2. Agent Assignments</p>
                   <ul className="list-disc list-inside space-y-1 mt-1 text-night-muted">
-                    <li><span className="text-cyan-400">Avery (PM):</span> Scope, PRD, and Acceptance Criteria.</li>
-                    <li><span className="text-purple-400">Darius (Architect):</span> Service boundaries & OpenAPI specifications.</li>
-                    <li><span className="text-amber-400">Kaelen (DB):</span> Normalized schema DDL & index strategies.</li>
-                    <li><span className="text-emerald-400">Devon (Backend):</span> Fastify/Node service logic & telemetry hooks.</li>
-                    <li><span className="text-pink-400">Lyra (Frontend):</span> Incident commander dashboard with live charts.</li>
-                    <li><span className="text-indigo-400">Tessa (QA):</span> Vitest integration suite & load testing scenarios.</li>
-                    <li><span className="text-red-400">Sloan (Security):</span> SAST vulnerability scan & secrets analysis.</li>
-                    <li><span className="text-sky-400">Torin (DevOps):</span> Multi-stage Docker container & GitHub Actions.</li>
-                    <li><span className="text-teal-400">Rhea (SRE):</span> Prometheus metrics exporter & self-healing runbook.</li>
+                    <li>
+                      <span className="text-cyan-400">Avery (PM):</span> Scope, PRD, and Acceptance
+                      Criteria.
+                    </li>
+                    <li>
+                      <span className="text-purple-400">Darius (Architect):</span> Service
+                      boundaries & OpenAPI specifications.
+                    </li>
+                    <li>
+                      <span className="text-amber-400">Kaelen (DB):</span> Normalized schema DDL &
+                      index strategies.
+                    </li>
+                    <li>
+                      <span className="text-emerald-400">Devon (Backend):</span> Fastify/Node
+                      service logic & telemetry hooks.
+                    </li>
+                    <li>
+                      <span className="text-pink-400">Lyra (Frontend):</span> Incident commander
+                      dashboard with live charts.
+                    </li>
+                    <li>
+                      <span className="text-indigo-400">Tessa (QA):</span> Vitest integration suite
+                      & load testing scenarios.
+                    </li>
+                    <li>
+                      <span className="text-red-400">Sloan (Security):</span> SAST vulnerability
+                      scan & secrets analysis.
+                    </li>
+                    <li>
+                      <span className="text-sky-400">Torin (DevOps):</span> Multi-stage Docker
+                      container & GitHub Actions.
+                    </li>
+                    <li>
+                      <span className="text-teal-400">Rhea (SRE):</span> Prometheus metrics exporter
+                      & self-healing runbook.
+                    </li>
                   </ul>
                 </div>
               </div>
@@ -694,34 +790,52 @@ function Landing() {
               </thead>
               <tbody className="divide-y divide-night-border text-sm">
                 <tr>
-                  <td className="py-4 px-4 font-medium text-night-foreground">Time to Production MVP</td>
+                  <td className="py-4 px-4 font-medium text-night-foreground">
+                    Time to Production MVP
+                  </td>
                   <td className="py-4 px-4 text-night-muted">8 – 16 Weeks</td>
                   <td className="py-4 px-4 text-night-muted">2 – 3 Weeks (Fragmented)</td>
                   <td className="py-4 px-4 font-semibold text-emerald-400">&lt; 15 Minutes</td>
                 </tr>
                 <tr>
-                  <td className="py-4 px-4 font-medium text-night-foreground">Team Roles & Specialization</td>
+                  <td className="py-4 px-4 font-medium text-night-foreground">
+                    Team Roles & Specialization
+                  </td>
                   <td className="py-4 px-4 text-night-muted">5 – 8 separate hires</td>
                   <td className="py-4 px-4 text-night-muted">Single generalist prompt</td>
-                  <td className="py-4 px-4 font-semibold text-primary">9 Dedicated Specialized Agents</td>
+                  <td className="py-4 px-4 font-semibold text-primary">
+                    9 Dedicated Specialized Agents
+                  </td>
                 </tr>
                 <tr>
-                  <td className="py-4 px-4 font-medium text-night-foreground">Schema & DB Architecture</td>
+                  <td className="py-4 px-4 font-medium text-night-foreground">
+                    Schema & DB Architecture
+                  </td>
                   <td className="py-4 px-4 text-night-muted">Days of schema meetings</td>
                   <td className="py-4 px-4 text-night-muted">Ad-hoc copy-pasting</td>
-                  <td className="py-4 px-4 font-semibold text-primary">Normalized DDL + Migrations</td>
+                  <td className="py-4 px-4 font-semibold text-primary">
+                    Normalized DDL + Migrations
+                  </td>
                 </tr>
                 <tr>
-                  <td className="py-4 px-4 font-medium text-night-foreground">Human Approval Gates</td>
+                  <td className="py-4 px-4 font-medium text-night-foreground">
+                    Human Approval Gates
+                  </td>
                   <td className="py-4 px-4 text-night-muted">Slow manual status calls</td>
                   <td className="py-4 px-4 text-night-muted">None (Prompt & Pray)</td>
-                  <td className="py-4 px-4 font-semibold text-primary">2 Mandatory Structured Checkpoints</td>
+                  <td className="py-4 px-4 font-semibold text-primary">
+                    2 Mandatory Structured Checkpoints
+                  </td>
                 </tr>
                 <tr>
-                  <td className="py-4 px-4 font-medium text-night-foreground">Security & Vulnerability Scans</td>
+                  <td className="py-4 px-4 font-medium text-night-foreground">
+                    Security & Vulnerability Scans
+                  </td>
                   <td className="py-4 px-4 text-night-muted">Costly third-party audits</td>
                   <td className="py-4 px-4 text-night-muted">Ignored / Hallucinated</td>
-                  <td className="py-4 px-4 font-semibold text-emerald-400">Automated SAST & Secret Checks</td>
+                  <td className="py-4 px-4 font-semibold text-emerald-400">
+                    Automated SAST & Secret Checks
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -740,7 +854,8 @@ function Landing() {
               Transparent Plans for Builders & Teams
             </h2>
             <p className="mt-3 text-sm sm:text-base text-night-muted">
-              Start free with no credit card required. Upgrade when you need continuous production deployments.
+              Start free with no credit card required. Upgrade when you need continuous production
+              deployments.
             </p>
           </div>
 
@@ -749,16 +864,26 @@ function Landing() {
             <div className="rounded-3xl border border-night-border bg-night/60 p-8 flex flex-col justify-between">
               <div>
                 <h3 className="font-display text-xl font-bold">Starter</h3>
-                <p className="mt-1 text-xs text-night-muted">Ideal for exploring the 9-agent workforce.</p>
+                <p className="mt-1 text-xs text-night-muted">
+                  Ideal for exploring the 9-agent workforce.
+                </p>
                 <div className="mt-6 flex items-baseline gap-1">
                   <span className="font-display text-4xl font-extrabold">$0</span>
                   <span className="text-xs text-night-muted">/ 14-day trial</span>
                 </div>
                 <ul className="mt-8 space-y-3 text-xs text-night-muted">
-                  <li className="flex items-center gap-2"><Check className="h-4 w-4 text-primary" /> All 9 specialized agents</li>
-                  <li className="flex items-center gap-2"><Check className="h-4 w-4 text-primary" /> 3 active software projects</li>
-                  <li className="flex items-center gap-2"><Check className="h-4 w-4 text-primary" /> Human Architecture Checkpoints</li>
-                  <li className="flex items-center gap-2"><Check className="h-4 w-4 text-primary" /> Mock mode & Bring-your-own-key</li>
+                  <li className="flex items-center gap-2">
+                    <Check className="h-4 w-4 text-primary" /> All 9 specialized agents
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Check className="h-4 w-4 text-primary" /> 3 active software projects
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Check className="h-4 w-4 text-primary" /> Human Architecture Checkpoints
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Check className="h-4 w-4 text-primary" /> Mock mode & Bring-your-own-key
+                  </li>
                 </ul>
               </div>
               <Button asChild className="w-full mt-8" variant="outline">
@@ -773,20 +898,37 @@ function Landing() {
               </div>
               <div>
                 <h3 className="font-display text-xl font-bold text-primary">Pro</h3>
-                <p className="mt-1 text-xs text-night-muted">For founders, solo engineers, and fast-moving teams.</p>
+                <p className="mt-1 text-xs text-night-muted">
+                  For founders, solo engineers, and fast-moving teams.
+                </p>
                 <div className="mt-6 flex items-baseline gap-1">
-                  <span className="font-display text-4xl font-extrabold text-night-foreground">$49</span>
+                  <span className="font-display text-4xl font-extrabold text-night-foreground">
+                    $49
+                  </span>
                   <span className="text-xs text-night-muted">/ month</span>
                 </div>
                 <ul className="mt-8 space-y-3 text-xs text-night-foreground">
-                  <li className="flex items-center gap-2"><Check className="h-4 w-4 text-primary" /> Unlimited active projects</li>
-                  <li className="flex items-center gap-2"><Check className="h-4 w-4 text-primary" /> All 9 AI agents with Priority Routing</li>
-                  <li className="flex items-center gap-2"><Check className="h-4 w-4 text-primary" /> Continuous SAST & QA repair loops</li>
-                  <li className="flex items-center gap-2"><Check className="h-4 w-4 text-primary" /> GitHub sync & automated PR creation</li>
-                  <li className="flex items-center gap-2"><Check className="h-4 w-4 text-primary" /> Voice turns & natural briefings</li>
+                  <li className="flex items-center gap-2">
+                    <Check className="h-4 w-4 text-primary" /> Unlimited active projects
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Check className="h-4 w-4 text-primary" /> All 9 AI agents with Priority Routing
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Check className="h-4 w-4 text-primary" /> Continuous SAST & QA repair loops
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Check className="h-4 w-4 text-primary" /> GitHub sync & automated PR creation
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Check className="h-4 w-4 text-primary" /> Voice turns & natural briefings
+                  </li>
                 </ul>
               </div>
-              <Button asChild className="w-full mt-8 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold shadow-glow">
+              <Button
+                asChild
+                className="w-full mt-8 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold shadow-glow"
+              >
                 <Link to="/signup">Get Started with Pro</Link>
               </Button>
             </div>
@@ -795,19 +937,29 @@ function Landing() {
             <div className="rounded-3xl border border-night-border bg-night/60 p-8 flex flex-col justify-between">
               <div>
                 <h3 className="font-display text-xl font-bold">Enterprise</h3>
-                <p className="mt-1 text-xs text-night-muted">Custom VPC deployment and local models.</p>
+                <p className="mt-1 text-xs text-night-muted">
+                  Custom VPC deployment and local models.
+                </p>
                 <div className="mt-6 flex items-baseline gap-1">
                   <span className="font-display text-4xl font-extrabold">Custom</span>
                 </div>
                 <ul className="mt-8 space-y-3 text-xs text-night-muted">
-                  <li className="flex items-center gap-2"><Check className="h-4 w-4 text-primary" /> Self-hosted on AWS/GCP VPC</li>
-                  <li className="flex items-center gap-2"><Check className="h-4 w-4 text-primary" /> Private Ollama / vLLM clusters</li>
-                  <li className="flex items-center gap-2"><Check className="h-4 w-4 text-primary" /> Custom agent contracts & schemas</li>
-                  <li className="flex items-center gap-2"><Check className="h-4 w-4 text-primary" /> Dedicated SLA & SSO / SAML</li>
+                  <li className="flex items-center gap-2">
+                    <Check className="h-4 w-4 text-primary" /> Self-hosted on AWS/GCP VPC
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Check className="h-4 w-4 text-primary" /> Private Ollama / vLLM clusters
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Check className="h-4 w-4 text-primary" /> Custom agent contracts & schemas
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Check className="h-4 w-4 text-primary" /> Dedicated SLA & SSO / SAML
+                  </li>
                 </ul>
               </div>
               <Button asChild className="w-full mt-8" variant="outline">
-                <Link to="/billing">Contact Sales</Link>
+                <Link to="/signup">Get Started</Link>
               </Button>
             </div>
           </div>
@@ -865,7 +1017,11 @@ function Landing() {
             Launch your 9-agent engineering workforce today. No credit card required.
           </p>
           <div className="mt-8 flex flex-wrap justify-center gap-4">
-            <Button asChild size="lg" className="bg-primary hover:bg-primary/90 text-sm font-semibold shadow-glow px-8">
+            <Button
+              asChild
+              size="lg"
+              className="bg-primary hover:bg-primary/90 text-sm font-semibold shadow-glow px-8"
+            >
               <Link to="/signup">
                 Create Free Account <ArrowRight className="ml-2 h-4 w-4" />
               </Link>
@@ -893,10 +1049,18 @@ function Landing() {
           </div>
 
           <div className="flex items-center gap-6">
-            <Link to="/office" className="hover:text-night-foreground">AI Office</Link>
-            <Link to="/dashboard" className="hover:text-night-foreground">Dashboard</Link>
-            <Link to="/login" className="hover:text-night-foreground">Sign In</Link>
-            <Link to="/signup" className="hover:text-night-foreground">Sign Up</Link>
+            <Link to="/office" className="hover:text-night-foreground">
+              AI Office
+            </Link>
+            <Link to="/dashboard" className="hover:text-night-foreground">
+              Dashboard
+            </Link>
+            <Link to="/login" className="hover:text-night-foreground">
+              Sign In
+            </Link>
+            <Link to="/signup" className="hover:text-night-foreground">
+              Sign Up
+            </Link>
           </div>
 
           <div className="flex items-center gap-2 text-[11px] text-emerald-400">
@@ -911,4 +1075,3 @@ function Landing() {
     </div>
   );
 }
-

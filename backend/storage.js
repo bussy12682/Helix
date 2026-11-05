@@ -1,35 +1,75 @@
-import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 
-export function createMemoryStore({ storagePath = ':memory:' } = {}) {
+export function createMemoryStore({ storagePath = ":memory:" } = {}) {
   const users = new Map();
   const sessions = new Map();
   const projects = new Map();
   const passwordResets = new Map();
+  const workflows = new Map();
+  const workspaces = new Map();
+  const traces = new Map();
+  let persistTimer = null;
 
+  // Atomic write: serialize to a temp file then rename so a crash never leaves a truncated state file.
   function persist() {
-    if (storagePath === ':memory:') return;
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+    }
+    if (storagePath === ":memory:") return;
 
     const state = {
+      version: 2,
       users: [...users.values()],
       sessions: [...sessions.values()],
       projects: [...projects.values()],
       passwordResets: [...passwordResets.values()],
+      workflows: [...workflows.values()],
+      workspaces: [...workspaces.values()],
+      traces: [...traces.entries()].map(([workflowId, spans]) => ({ workflowId, spans })),
     };
     mkdirSync(dirname(storagePath), { recursive: true });
-    writeFileSync(storagePath, JSON.stringify(state, null, 2), 'utf8');
+    const tempPath = `${storagePath}.${process.pid}.tmp`;
+    writeFileSync(tempPath, JSON.stringify(state), "utf8");
+    renameSync(tempPath, storagePath);
   }
 
-  if (storagePath !== ':memory:' && existsSync(storagePath)) {
+  // Coalesces high-frequency updates (task progress, traces) into a single write.
+  function persistSoon(delayMs = 250) {
+    if (storagePath === ":memory:" || persistTimer) return;
+    persistTimer = setTimeout(() => {
+      persistTimer = null;
+      try {
+        persist();
+      } catch (error) {
+        console.error("[storage] Deferred persist failed:", error);
+      }
+    }, delayMs);
+    persistTimer.unref?.();
+  }
+
+  function flush() {
+    if (persistTimer) persist();
+  }
+
+  if (storagePath !== ":memory:" && existsSync(storagePath)) {
     try {
-      const state = JSON.parse(readFileSync(storagePath, 'utf8'));
+      const state = JSON.parse(readFileSync(storagePath, "utf8"));
       for (const user of state.users ?? []) users.set(user.id, user);
       for (const session of state.sessions ?? []) sessions.set(session.token, session);
       for (const project of state.projects ?? []) projects.set(project.id, project);
       for (const reset of state.passwordResets ?? []) passwordResets.set(reset.token, reset);
-    } catch {
-      // Start with an empty store if the local state file is missing or invalid.
+      for (const workflow of state.workflows ?? []) workflows.set(workflow.id, workflow);
+      for (const workspace of state.workspaces ?? [])
+        workspaces.set(workspace.projectId, workspace);
+      for (const entry of state.traces ?? []) traces.set(entry.workflowId, entry.spans ?? []);
+    } catch (error) {
+      console.error(
+        `[storage] Could not read ${storagePath}; starting with an empty store.`,
+        error.message,
+      );
     }
   }
 
@@ -37,14 +77,21 @@ export function createMemoryStore({ storagePath = ':memory:' } = {}) {
     return `${prefix}_${randomUUID()}`;
   }
 
-  function createUser({ name, email, passwordHash }) {
-    const id = nextId('user');
+  function createUser({
+    name,
+    email,
+    passwordHash,
+    emailVerified = false,
+    authProvider = "password",
+  }) {
+    const id = nextId("user");
     const user = {
       id,
       name,
       email: email.toLowerCase(),
       passwordHash,
-      emailVerified: false,
+      authProvider,
+      emailVerified,
       emailVerificationToken: null,
       createdAt: new Date().toISOString(),
     };
@@ -54,7 +101,9 @@ export function createMemoryStore({ storagePath = ':memory:' } = {}) {
   }
 
   function getUserByEmail(email) {
-    const normalized = String(email ?? '').trim().toLowerCase();
+    const normalized = String(email ?? "")
+      .trim()
+      .toLowerCase();
     return [...users.values()].find((user) => user.email === normalized) ?? null;
   }
 
@@ -62,12 +111,38 @@ export function createMemoryStore({ storagePath = ':memory:' } = {}) {
     return users.get(id) ?? null;
   }
 
+  function updateUser(id, patch) {
+    const user = users.get(id);
+    if (!user) return null;
+    Object.assign(user, patch, { updatedAt: new Date().toISOString() });
+    persist();
+    return user;
+  }
+
+  function deleteSession(token) {
+    const deleted = sessions.delete(token);
+    if (deleted) persist();
+    return deleted;
+  }
+
+  function deleteSessionsForUser(userId) {
+    let count = 0;
+    for (const [token, session] of sessions) {
+      if (session.userId === userId) {
+        sessions.delete(token);
+        count += 1;
+      }
+    }
+    if (count) persist();
+    return count;
+  }
+
   function createSession(userId, rememberMe = false) {
     const token = `helix.${randomUUID()}`;
     // 8 hours default, 30 days if remembered
     const expirationMs = rememberMe ? 1000 * 60 * 60 * 24 * 30 : 1000 * 60 * 60 * 8;
     const session = {
-      id: nextId('session'),
+      id: nextId("session"),
       token,
       userId,
       rememberMe,
@@ -111,8 +186,8 @@ export function createMemoryStore({ storagePath = ':memory:' } = {}) {
     };
   }
 
-  function createProject({ ownerId, name, description = '', keyFeatures = [], techStack = [] }) {
-    const id = nextId('project');
+  function createProject({ ownerId, name, description = "", keyFeatures = [], techStack = [] }) {
+    const id = nextId("project");
     const project = {
       id,
       ownerId,
@@ -120,7 +195,7 @@ export function createMemoryStore({ storagePath = ':memory:' } = {}) {
       description,
       keyFeatures,
       techStack,
-      status: 'active',
+      status: "active",
       progress: 0,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -134,10 +209,58 @@ export function createMemoryStore({ storagePath = ':memory:' } = {}) {
     return projects.get(id) ?? null;
   }
 
+  function updateProject(id, patch) {
+    const project = projects.get(id);
+    if (!project) return null;
+    Object.assign(project, patch, { updatedAt: new Date().toISOString() });
+    persistSoon();
+    return project;
+  }
+
   function deleteProject(id) {
     const deleted = projects.delete(id);
-    if (deleted) persist();
+    if (deleted) {
+      for (const [workflowId, workflow] of workflows) {
+        if (workflow.projectId === id) {
+          workflows.delete(workflowId);
+          traces.delete(workflowId);
+        }
+      }
+      workspaces.delete(id);
+      persist();
+    }
     return deleted;
+  }
+
+  function saveWorkflow(workflow) {
+    workflows.set(workflow.id, workflow);
+    persistSoon();
+  }
+
+  function listWorkflows() {
+    return [...workflows.values()];
+  }
+
+  function saveWorkspace(workspace) {
+    workspaces.set(workspace.projectId, workspace);
+    persistSoon();
+  }
+
+  function listWorkspaces() {
+    return [...workspaces.values()];
+  }
+
+  function saveTrace(span) {
+    if (!span?.workflowId) return;
+    const list = traces.get(span.workflowId) ?? [];
+    list.push(span);
+    if (list.length > 500) list.shift();
+    traces.set(span.workflowId, list);
+    persistSoon();
+  }
+
+  function listTraces() {
+    return [...traces.values()].flat();
   }
 
   function listProjectsForUser(userId) {
@@ -206,7 +329,21 @@ export function createMemoryStore({ storagePath = ':memory:' } = {}) {
     sessions,
     projects,
     passwordResets,
+    workflows,
+    mode: storagePath === ":memory:" ? "memory" : "file",
     nextId,
+    persist,
+    flush,
+    updateUser,
+    deleteSession,
+    deleteSessionsForUser,
+    updateProject,
+    saveWorkflow,
+    listWorkflows,
+    saveWorkspace,
+    listWorkspaces,
+    saveTrace,
+    listTraces,
     createUser,
     getUserByEmail,
     getUserById,

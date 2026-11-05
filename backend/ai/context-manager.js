@@ -4,12 +4,57 @@
  * project context, and tracks versioned artifacts and approved decisions.
  */
 
-import { AGENT_ROLES } from './contracts.js';
+import { AGENT_ROLES } from "./contracts.js";
 
 export class ContextManager {
-  constructor() {
+  constructor({ onChange = null } = {}) {
     // In-memory workspace cache indexed by projectId
     this.projectWorkspaces = new Map();
+    this.onChange = onChange;
+  }
+
+  setPersistence(onChange) {
+    this.onChange = onChange;
+  }
+
+  notifyChange(projectId) {
+    if (!this.onChange) return;
+    const ws = this.projectWorkspaces.get(projectId);
+    if (ws) this.onChange(this.serializeWorkspace(ws));
+  }
+
+  serializeWorkspace(ws) {
+    return { ...ws, artifacts: [...ws.artifacts.values()] };
+  }
+
+  /**
+   * Restores persisted workspaces (artifacts stored as arrays) into memory.
+   */
+  hydrate(workspaces = []) {
+    for (const ws of workspaces) {
+      if (!ws?.projectId) continue;
+      const artifacts = new Map();
+      for (const artifact of ws.artifacts ?? []) artifacts.set(artifact.path, artifact);
+      this.projectWorkspaces.set(ws.projectId, {
+        approvedDecisions: [],
+        reviewFindings: [],
+        taskHistory: [],
+        ...ws,
+        artifacts,
+      });
+    }
+  }
+
+  /**
+   * Refreshes brief fields (name, description, features, stack) after a project is edited.
+   */
+  updateProjectInfo(projectId, data = {}) {
+    const ws = this.projectWorkspaces.get(projectId);
+    if (!ws) return;
+    for (const key of ["name", "description", "keyFeatures", "techStack"]) {
+      if (data[key] !== undefined) ws[key] = data[key];
+    }
+    this.notifyChange(projectId);
   }
 
   /**
@@ -19,8 +64,8 @@ export class ContextManager {
     if (!this.projectWorkspaces.has(projectId)) {
       this.projectWorkspaces.set(projectId, {
         projectId,
-        name: initialData.name || 'Untitled Project',
-        description: initialData.description || '',
+        name: initialData.name || "Untitled Project",
+        description: initialData.description || "",
         keyFeatures: initialData.keyFeatures || [],
         techStack: initialData.techStack || [],
         approvedDecisions: [],
@@ -52,6 +97,7 @@ export class ContextManager {
     };
 
     ws.artifacts.set(path, record);
+    this.notifyChange(projectId);
     return record;
   }
 
@@ -72,6 +118,7 @@ export class ContextManager {
       ...decision,
       timestamp: new Date().toISOString(),
     });
+    this.notifyChange(projectId);
   }
 
   /**
@@ -82,6 +129,7 @@ export class ContextManager {
     const ws = this.getOrCreateWorkspace(projectId);
 
     const baseProjectInfo = {
+      id: projectId,
       name: ws.name,
       description: ws.description,
       keyFeatures: ws.keyFeatures,
@@ -117,7 +165,7 @@ export class ContextManager {
 
       case AGENT_ROLES.SYSTEM_ARCHITECT:
         // Architect needs PRD and core requirements
-        relevantArtifacts.prd = getArtifact('prd');
+        relevantArtifacts.prd = getArtifact("prd");
         return {
           project: baseProjectInfo,
           relevantArtifacts,
@@ -126,8 +174,8 @@ export class ContextManager {
 
       case AGENT_ROLES.DATABASE_ENGINEER:
         // Database AI needs PRD and Architecture spec
-        relevantArtifacts.prd = getArtifact('prd');
-        relevantArtifacts.architecture = getArtifact('architecture');
+        relevantArtifacts.prd = getArtifact("prd");
+        relevantArtifacts.architecture = getArtifact("architecture");
         return {
           project: baseProjectInfo,
           relevantArtifacts,
@@ -136,9 +184,9 @@ export class ContextManager {
 
       case AGENT_ROLES.BACKEND_ENGINEER:
         // Backend AI needs Architecture, OpenAPI spec, and Database schema
-        relevantArtifacts.architecture = getArtifact('architecture');
-        relevantArtifacts.apiSpec = getArtifact('api-spec');
-        relevantArtifacts.schema = getArtifact('schema.sql');
+        relevantArtifacts.architecture = getArtifact("architecture");
+        relevantArtifacts.apiSpec = getArtifact("api-spec");
+        relevantArtifacts.schema = getArtifact("schema.sql");
         return {
           project: baseProjectInfo,
           relevantArtifacts,
@@ -148,9 +196,9 @@ export class ContextManager {
 
       case AGENT_ROLES.FRONTEND_ENGINEER:
         // Frontend AI needs PRD, Architecture, and API contracts (no database internals)
-        relevantArtifacts.prd = getArtifact('prd');
-        relevantArtifacts.architecture = getArtifact('architecture');
-        relevantArtifacts.apiSpec = getArtifact('api-spec');
+        relevantArtifacts.prd = getArtifact("prd");
+        relevantArtifacts.architecture = getArtifact("architecture");
+        relevantArtifacts.apiSpec = getArtifact("api-spec");
         return {
           project: baseProjectInfo,
           relevantArtifacts,
@@ -160,10 +208,10 @@ export class ContextManager {
 
       case AGENT_ROLES.SECURITY_ENGINEER:
         // Security AI needs API routes, Database schema, and Architecture
-        relevantArtifacts.architecture = getArtifact('architecture');
-        relevantArtifacts.apiSpec = getArtifact('api-spec');
-        relevantArtifacts.schema = getArtifact('schema.sql');
-        relevantArtifacts.backendRoutes = getArtifact('routes');
+        relevantArtifacts.architecture = getArtifact("architecture");
+        relevantArtifacts.apiSpec = getArtifact("api-spec");
+        relevantArtifacts.schema = getArtifact("schema.sql");
+        relevantArtifacts.backendRoutes = getArtifact("routes");
         return {
           project: baseProjectInfo,
           relevantArtifacts,
@@ -172,10 +220,10 @@ export class ContextManager {
 
       case AGENT_ROLES.QA_ENGINEER:
         // QA AI needs PRD acceptance criteria, API routes, and Frontend components
-        relevantArtifacts.prd = getArtifact('prd');
-        relevantArtifacts.apiSpec = getArtifact('api-spec');
-        relevantArtifacts.backendRoutes = getArtifact('routes');
-        relevantArtifacts.frontendViews = getArtifact('tsx') || getArtifact('jsx');
+        relevantArtifacts.prd = getArtifact("prd");
+        relevantArtifacts.apiSpec = getArtifact("api-spec");
+        relevantArtifacts.backendRoutes = getArtifact("routes");
+        relevantArtifacts.frontendViews = getArtifact("tsx") || getArtifact("jsx");
         return {
           project: baseProjectInfo,
           relevantArtifacts,
@@ -184,8 +232,8 @@ export class ContextManager {
 
       case AGENT_ROLES.DEVOPS_ENGINEER:
         // DevOps needs Architecture, Stack, and QA test plan
-        relevantArtifacts.architecture = getArtifact('architecture');
-        relevantArtifacts.qaReport = getArtifact('test-plan');
+        relevantArtifacts.architecture = getArtifact("architecture");
+        relevantArtifacts.qaReport = getArtifact("test-plan");
         return {
           project: baseProjectInfo,
           relevantArtifacts,
@@ -194,10 +242,10 @@ export class ContextManager {
 
       case AGENT_ROLES.DOCUMENTATION_ENGINEER:
         // Documentation needs PRD, Architecture, API spec, and DevOps configs
-        relevantArtifacts.prd = getArtifact('prd');
-        relevantArtifacts.architecture = getArtifact('architecture');
-        relevantArtifacts.apiSpec = getArtifact('api-spec');
-        relevantArtifacts.dockerfile = getArtifact('Dockerfile');
+        relevantArtifacts.prd = getArtifact("prd");
+        relevantArtifacts.architecture = getArtifact("architecture");
+        relevantArtifacts.apiSpec = getArtifact("api-spec");
+        relevantArtifacts.dockerfile = getArtifact("Dockerfile");
         return {
           project: baseProjectInfo,
           relevantArtifacts,

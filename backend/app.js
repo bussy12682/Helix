@@ -1,19 +1,106 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from "node:crypto";
 
-import { loadConfig } from './config.js';
-import { createMemoryStore } from './storage.js';
-import { initializeEmailService, sendVerificationEmail, sendPasswordResetEmail } from './email.js';
-import { RateLimiter } from './rate-limiter.js';
-import { validatePasswordComplexity } from './password-validator.js';
-import { analyzeProjectBrief, respondToVoiceTurn, transcribeVoiceNote } from './ai.js';
-import { extractRawText } from 'mammoth';
-import { PDFParse } from 'pdf-parse';
-import { createAiSubsystem } from './ai/index.js';
+import { loadConfig } from "./config.js";
+import { createMemoryStore } from "./storage.js";
+import { initializeEmailService, sendVerificationEmail, sendPasswordResetEmail } from "./email.js";
+import { RateLimiter } from "./rate-limiter.js";
+import { validatePasswordComplexity } from "./password-validator.js";
+import { analyzeProjectBrief, respondToVoiceTurn, transcribeVoiceNote } from "./ai.js";
+import { extractRawText } from "mammoth";
+import { PDFParse } from "pdf-parse";
+import { createAiSubsystem } from "./ai/index.js";
+import { hashPassword, verifyPassword } from "./passwords.js";
+import { WorkflowStateError } from "./ai/orchestrator.js";
+
+const DEFAULT_SECRET = "development-secret-change-me";
+
+class HttpError extends Error {
+  constructor(status, code, message) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/**
+ * Connects the AI subsystem to the persistent store: restores saved workflows, artifacts and
+ * traces, persists every subsequent change, and mirrors workflow progress onto the project record.
+ */
+export function bindAiToStore(ai, store) {
+  ai.contextManager.hydrate?.(store.listWorkspaces());
+  ai.contextManager.setPersistence?.((workspace) => store.saveWorkspace(workspace));
+  ai.observability.hydrate?.(store.listTraces());
+  ai.observability.onSpanCompleted = (span) => store.saveTrace(span);
+  ai.orchestrator.attachStorage?.(
+    {
+      saveWorkflow(workflow) {
+        store.saveWorkflow(workflow);
+        const project = store.getProjectById(workflow.projectId);
+        if (!project) return;
+        const status =
+          {
+            pending: "Planning",
+            running: "In Progress",
+            awaiting_approval: "Awaiting Approval",
+            completed: "Completed",
+            failed: "Failed",
+            cancelled: "Cancelled",
+          }[workflow.status] ?? project.status;
+        if (
+          project.progress !== workflow.progress ||
+          project.status !== status ||
+          project.workflowId !== workflow.id
+        ) {
+          store.updateProject(project.id, {
+            progress: workflow.progress ?? 0,
+            status,
+            workflowId: workflow.id,
+            workflowStatus: workflow.status,
+          });
+        }
+      },
+    },
+    store.listWorkflows(),
+  );
+}
+
+function resolveCorsOrigin(config, origin) {
+  if (!origin) return null;
+  if (config.corsOrigins.includes("*")) return "*";
+  return config.corsOrigins.includes(origin) ? origin : null;
+}
+
+function applyStandardHeaders(response, { config, request, requestId }) {
+  const headers = response.headers;
+  const allowed = resolveCorsOrigin(config, request.headers.get("origin"));
+  if (allowed) {
+    headers.set("Access-Control-Allow-Origin", allowed);
+    headers.set("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+    headers.set("Access-Control-Allow-Headers", "Content-Type,Authorization");
+    headers.set("Access-Control-Expose-Headers", "x-request-id,x-correlation-id");
+    if (allowed !== "*") headers.append("Vary", "Origin");
+  }
+  headers.set("x-content-type-options", "nosniff");
+  headers.set("x-frame-options", "DENY");
+  headers.set("referrer-policy", "no-referrer");
+  headers.set("x-request-id", requestId);
+  headers.set("x-correlation-id", requestId);
+  return response;
+}
 
 export function createApp(overrides = {}) {
   const config = loadConfig(overrides.env ?? process.env);
+  if (
+    config.nodeEnv === "production" &&
+    (!config.jwtSecret ||
+      config.jwtSecret === DEFAULT_SECRET ||
+      config.jwtSecret.startsWith("change-me"))
+  ) {
+    throw new Error("JWT_SECRET must be set to a strong random value in production.");
+  }
   const store = createMemoryStore({ storagePath: overrides.storagePath ?? config.storagePath });
   const ai = overrides.ai ?? createAiSubsystem(config);
+  bindAiToStore(ai, store);
   const loginRateLimiter = new RateLimiter();
   const registerRateLimiter = new RateLimiter();
   const passwordResetRateLimiter = new RateLimiter();
@@ -31,10 +118,42 @@ export function createApp(overrides = {}) {
     async request(input, init = {}) {
       const request = input instanceof Request ? input : new Request(input, init);
       const requestId = randomUUID();
-      const response = await handleRequest({ request, config, store, ai, loginRateLimiter, registerRateLimiter, passwordResetRateLimiter, requestId });
-      response.headers.set('x-request-id', requestId);
-      response.headers.set('x-correlation-id', requestId);
-      return response;
+      let response;
+      try {
+        const declaredLength = Number(request.headers.get("content-length") ?? 0);
+        if (declaredLength > config.maxBodyBytes) {
+          throw new HttpError(
+            413,
+            "PAYLOAD_TOO_LARGE",
+            `Request body exceeds ${config.maxBodyBytes} bytes`,
+          );
+        }
+        response = await handleRequest({
+          request,
+          config,
+          store,
+          ai,
+          loginRateLimiter,
+          registerRateLimiter,
+          passwordResetRateLimiter,
+          requestId,
+        });
+      } catch (error) {
+        if (error instanceof HttpError) {
+          response = jsonResponse(error.status, {
+            error: { code: error.code, message: error.message, requestId },
+          });
+        } else {
+          console.error(`[${requestId}] Unhandled error:`, error);
+          response = jsonResponse(500, {
+            error: { code: "INTERNAL_SERVER_ERROR", message: "Unexpected server error", requestId },
+          });
+        }
+      }
+      return applyStandardHeaders(response, { config, request, requestId });
+    },
+    close() {
+      store.flush();
     },
   };
 
@@ -42,134 +161,171 @@ export function createApp(overrides = {}) {
   return app;
 }
 
-async function handleRequest({ request, config, store, ai, loginRateLimiter, registerRateLimiter, passwordResetRateLimiter, requestId }) {
+async function handleRequest({
+  request,
+  config,
+  store,
+  ai,
+  loginRateLimiter,
+  registerRateLimiter,
+  passwordResetRateLimiter,
+  requestId,
+}) {
   const url = new URL(request.url);
   const path = url.pathname;
 
-  if (request.method === 'OPTIONS') {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'x-correlation-id': requestId,
-      },
-    });
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: { "Access-Control-Max-Age": "600" } });
   }
 
-  if (request.method === 'GET' && path === '/api/v1/health') {
+  if (request.method === "GET" && path === "/api/v1/health") {
     return jsonResponse(200, {
       ok: true,
-      service: 'helix-core',
-      status: 'healthy',
+      service: "helix-core",
+      status: "healthy",
       requestId,
       environment: config.nodeEnv,
+      storage: store.mode ?? (config.storagePath === ":memory:" ? "memory" : "file"),
+      ai: ai.modelRouter?.getStatus?.() ?? null,
       timestamp: new Date().toISOString(),
     });
   }
 
-  if (request.method === 'POST' && path === '/api/v1/auth/register') {
+  if (request.method === "GET" && path === "/api/v1/auth/me") {
+    return handleGetMe({ request, store, requestId });
+  }
+
+  if (request.method === "PATCH" && path === "/api/v1/auth/me") {
+    return handleUpdateMe({ request, store, requestId });
+  }
+
+  if (request.method === "POST" && path === "/api/v1/auth/logout") {
+    return handleLogout({ request, store, requestId });
+  }
+
+  if (request.method === "POST" && path === "/api/v1/auth/change-password") {
+    return handleChangePassword({ request, config, store, requestId });
+  }
+
+  if (request.method === "POST" && path === "/api/v1/auth/register") {
     return handleRegister({ request, config, store, registerRateLimiter, requestId });
   }
 
-  if (request.method === 'POST' && path === '/api/v1/auth/login') {
+  if (request.method === "POST" && path === "/api/v1/auth/login") {
     return handleLogin({ request, config, store, loginRateLimiter, requestId });
   }
 
-  if (request.method === 'POST' && path === '/api/v1/auth/demo') {
+  if (request.method === "POST" && path === "/api/v1/auth/demo") {
     return handleDemoLogin({ request, config, store, requestId });
   }
 
-  if (request.method === 'POST' && path === '/api/v1/auth/google/callback') {
+  if (request.method === "POST" && path === "/api/v1/auth/google/callback") {
     return handleGoogleCallback({ request, config, store, requestId });
   }
 
-  if (request.method === 'POST' && path === '/api/v1/auth/github/callback') {
+  if (request.method === "POST" && path === "/api/v1/auth/github/callback") {
     return handleGitHubCallback({ request, config, store, requestId });
   }
 
-  if (request.method === 'POST' && path === '/api/v1/auth/password-reset/request') {
-    return handlePasswordResetRequest({ request, config, store, passwordResetRateLimiter, requestId });
+  if (request.method === "POST" && path === "/api/v1/auth/password-reset/request") {
+    return handlePasswordResetRequest({
+      request,
+      config,
+      store,
+      passwordResetRateLimiter,
+      requestId,
+    });
   }
 
-  if (request.method === 'POST' && path === '/api/v1/auth/password-reset/complete') {
+  if (request.method === "POST" && path === "/api/v1/auth/password-reset/complete") {
     return handlePasswordResetComplete({ request, config, store, requestId });
   }
 
-  if (request.method === 'POST' && path === '/api/v1/auth/verify-email') {
+  if (request.method === "POST" && path === "/api/v1/auth/verify-email") {
     return handleVerifyEmail({ request, store, requestId });
   }
 
-  if (request.method === 'GET' && path === '/api/v1/projects') {
+  if (request.method === "GET" && path === "/api/v1/projects") {
     return handleListProjects({ request, store, requestId });
   }
 
-  if (request.method === 'GET' && path === '/api/v1/dashboard') {
+  if (request.method === "GET" && path === "/api/v1/dashboard") {
     return handleGetDashboard({ request, store, requestId });
   }
 
-  if (request.method === 'POST' && path === '/api/v1/projects') {
+  if (request.method === "POST" && path === "/api/v1/projects") {
     return handleCreateProject({ request, store, requestId });
   }
 
-  if (request.method === 'POST' && path === '/api/v1/projects/analyze') {
+  if (request.method === "POST" && path === "/api/v1/projects/analyze") {
     return handleAnalyzeProject({ request, config, store, requestId });
   }
 
-  if (request.method === 'POST' && path === '/api/v1/voice/turn') {
+  if (request.method === "POST" && path === "/api/v1/voice/turn") {
     return handleVoiceTurn({ request, config, store, requestId });
   }
 
-  if (request.method === 'POST' && path === '/api/v1/voice/transcribe') {
+  if (request.method === "POST" && path === "/api/v1/voice/transcribe") {
     return handleVoiceTranscription({ request, config, store, requestId });
   }
 
-  if (request.method === 'POST' && path === '/api/v1/projects/extract-document') {
+  if (request.method === "POST" && path === "/api/v1/projects/extract-document") {
     return handleExtractProjectDocument({ request, store, requestId });
   }
 
   // AI Workflow and Office routes
-  if (request.method === 'POST' && /^\/api\/v1\/projects\/[^/]+\/workflows$/.test(path)) {
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/workflows$/.test(path)) {
     return handleStartProjectWorkflow({ request, store, ai, requestId, path });
   }
 
-  if (request.method === 'GET' && /^\/api\/v1\/projects\/[^/]+\/workflows\/stream$/.test(path)) {
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/workflows\/stream$/.test(path)) {
     return handleWorkflowEventsStream({ request, store, ai, requestId, path });
   }
 
-  if (request.method === 'GET' && /^\/api\/v1\/projects\/[^/]+\/workflows$/.test(path)) {
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/workflows$/.test(path)) {
     return handleGetProjectWorkflow({ request, store, ai, requestId, path });
   }
 
-  if (request.method === 'GET' && /^\/api\/v1\/projects\/[^/]+\/office$/.test(path)) {
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/office$/.test(path)) {
     return handleGetProjectOffice({ request, store, ai, requestId, path });
   }
 
-  if (request.method === 'GET' && /^\/api\/v1\/projects\/[^/]+\/artifacts$/.test(path)) {
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/artifacts$/.test(path)) {
     return handleGetProjectArtifacts({ request, store, ai, requestId, path });
   }
 
-  if (request.method === 'POST' && /^\/api\/v1\/workflows\/[^/]+\/approve$/.test(path)) {
+  if (request.method === "POST" && /^\/api\/v1\/workflows\/[^/]+\/approve$/.test(path)) {
     return handleApproveWorkflowCheckpoint({ request, store, ai, requestId, path });
   }
 
-  if (request.method === 'GET' && /^\/api\/v1\/workflows\/[^/]+\/traces$/.test(path)) {
+  if (request.method === "POST" && /^\/api\/v1\/workflows\/[^/]+\/retry$/.test(path)) {
+    return handleRetryWorkflow({ request, store, ai, requestId, path });
+  }
+
+  if (request.method === "POST" && /^\/api\/v1\/workflows\/[^/]+\/cancel$/.test(path)) {
+    return handleCancelWorkflow({ request, store, ai, requestId, path });
+  }
+
+  if (request.method === "PATCH" && /^\/api\/v1\/projects\/[^/]+$/.test(path)) {
+    return handleUpdateProject({ request, store, ai, requestId, path });
+  }
+
+  if (request.method === "GET" && /^\/api\/v1\/workflows\/[^/]+\/traces$/.test(path)) {
     return handleGetWorkflowTraces({ request, store, ai, requestId, path });
   }
 
-  if (request.method === 'DELETE' && /^\/api\/v1\/projects\//.test(path)) {
-    return handleDeleteProject({ request, store, requestId, path });
+  if (request.method === "DELETE" && /^\/api\/v1\/projects\//.test(path)) {
+    return handleDeleteProject({ request, store, ai, requestId, path });
   }
 
-  if (request.method === 'GET' && /^\/api\/v1\/projects\//.test(path)) {
+  if (request.method === "GET" && /^\/api\/v1\/projects\//.test(path)) {
     return handleGetProject({ request, store, requestId, path });
   }
 
   return jsonResponse(404, {
     error: {
-      code: 'NOT_FOUND',
-      message: 'Route not found',
+      code: "NOT_FOUND",
+      message: "Route not found",
       requestId,
     },
   });
@@ -179,40 +335,39 @@ function jsonResponse(status, payload, headers = {}) {
   return new Response(JSON.stringify(payload), {
     status,
     headers: {
-      'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-store',
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
       ...headers,
     },
   });
 }
 
 async function parseJsonBody(request) {
-  const contentType = request.headers.get('content-type') ?? '';
-  if (!contentType.includes('application/json')) {
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
     return {};
   }
 
+  const text = await request.text();
+  if (!text) return {};
   try {
-    const text = await request.text();
-    return text ? JSON.parse(text) : {};
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
   } catch {
-    return {};
+    throw new HttpError(400, "INVALID_JSON", "Request body is not valid JSON");
   }
 }
 
 function requireAuth(request, store) {
-  const header = request.headers.get('authorization') ?? '';
-  const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length).trim() : null;
+  const header = request.headers.get("authorization") ?? "";
+  const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : null;
 
   if (!token) {
     return {
       error: jsonResponse(401, {
         error: {
-          code: 'UNAUTHORIZED',
-          message: 'Missing bearer token',
+          code: "UNAUTHORIZED",
+          message: "Missing bearer token",
           requestId: randomUUID(),
         },
       }),
@@ -222,8 +377,10 @@ function requireAuth(request, store) {
   // Validate session expiration
   const sessionStatus = store.validateSessionExpiration(token);
   if (!sessionStatus.isValid) {
-    const errorCode = sessionStatus.expired ? 'SESSION_EXPIRED' : 'INVALID_SESSION';
-    const message = sessionStatus.expired ? 'Your session has expired. Please log in again.' : 'Invalid or expired session';
+    const errorCode = sessionStatus.expired ? "SESSION_EXPIRED" : "INVALID_SESSION";
+    const message = sessionStatus.expired
+      ? "Your session has expired. Please log in again."
+      : "Invalid or expired session";
     return {
       error: jsonResponse(401, {
         error: {
@@ -240,8 +397,8 @@ function requireAuth(request, store) {
     return {
       error: jsonResponse(401, {
         error: {
-          code: 'UNAUTHORIZED',
-          message: 'Invalid or expired session',
+          code: "UNAUTHORIZED",
+          message: "Invalid or expired session",
           requestId: randomUUID(),
         },
       }),
@@ -253,8 +410,8 @@ function requireAuth(request, store) {
     return {
       error: jsonResponse(401, {
         error: {
-          code: 'UNAUTHORIZED',
-          message: 'Session user not found',
+          code: "UNAUTHORIZED",
+          message: "Session user not found",
           requestId: randomUUID(),
         },
       }),
@@ -264,23 +421,246 @@ function requireAuth(request, store) {
   return { user, session };
 }
 
-function hashPassword(password, secret) {
-  return createHash('sha256').update(`${password}:${secret}`).digest('hex');
+function publicUser(user) {
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    emailVerified: Boolean(user.emailVerified),
+    authProvider: user.authProvider ?? "password",
+    createdAt: user.createdAt,
+  };
+}
+
+function bearerToken(request) {
+  const header = request.headers.get("authorization") ?? "";
+  return header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : null;
+}
+
+function requireProjectAccess(request, store, projectId, requestId) {
+  const auth = requireAuth(request, store);
+  if ("error" in auth) return auth;
+  const project = store.getProjectById(projectId);
+  if (!project) {
+    return {
+      error: jsonResponse(404, {
+        error: { code: "NOT_FOUND", message: "Project not found", requestId },
+      }),
+    };
+  }
+  if (project.ownerId !== auth.user.id) {
+    return {
+      error: jsonResponse(403, {
+        error: { code: "FORBIDDEN", message: "You do not have access to this project", requestId },
+      }),
+    };
+  }
+  return { ...auth, project };
+}
+
+function requireWorkflowAccess(request, store, ai, workflowId, requestId) {
+  const workflow = ai.orchestrator.getWorkflow(workflowId);
+  const auth = requireAuth(request, store);
+  if ("error" in auth) return auth;
+  const project = workflow ? store.getProjectById(workflow.projectId) : null;
+  // Same 404 for missing and foreign workflows so IDs cannot be probed.
+  if (!workflow || !project || project.ownerId !== auth.user.id) {
+    return {
+      error: jsonResponse(404, {
+        error: { code: "NOT_FOUND", message: "Workflow not found", requestId },
+      }),
+    };
+  }
+  return { ...auth, workflow, project };
+}
+
+function workflowErrorResponse(error, requestId, fallbackCode) {
+  if (error instanceof WorkflowStateError) {
+    const status = error.code === "WORKFLOW_NOT_FOUND" ? 404 : 409;
+    return jsonResponse(status, { error: { code: error.code, message: error.message, requestId } });
+  }
+  return jsonResponse(400, { error: { code: fallbackCode, message: error.message, requestId } });
+}
+
+async function waitBriefly(promise, ms) {
+  let timer;
+  await Promise.race([
+    promise.catch(() => null),
+    new Promise((resolve) => {
+      timer = setTimeout(resolve, ms);
+    }),
+  ]);
+  clearTimeout(timer);
+}
+
+async function handleGetMe({ request, store, requestId }) {
+  const auth = requireAuth(request, store);
+  if ("error" in auth) return auth.error;
+  return jsonResponse(
+    200,
+    {
+      user: publicUser(auth.user),
+      session: { expiresAt: auth.session.expiresAt, rememberMe: auth.session.rememberMe },
+    },
+    { "x-correlation-id": requestId },
+  );
+}
+
+async function handleUpdateMe({ request, store, requestId }) {
+  const auth = requireAuth(request, store);
+  if ("error" in auth) return auth.error;
+  const body = await parseJsonBody(request);
+  const name = String(body.name ?? "").trim();
+  if (!name || name.length > 120) {
+    return jsonResponse(400, {
+      error: {
+        code: "INVALID_INPUT",
+        message: "Name must be between 1 and 120 characters",
+        requestId,
+      },
+    });
+  }
+  const user = store.updateUser(auth.user.id, { name });
+  return jsonResponse(200, { user: publicUser(user) }, { "x-correlation-id": requestId });
+}
+
+async function handleLogout({ request, store, requestId }) {
+  const token = bearerToken(request);
+  if (token) store.deleteSession(token);
+  return jsonResponse(200, { message: "Logged out" }, { "x-correlation-id": requestId });
+}
+
+async function handleChangePassword({ request, config, store, requestId }) {
+  const auth = requireAuth(request, store);
+  if ("error" in auth) return auth.error;
+  const body = await parseJsonBody(request);
+  const currentPassword = String(body.currentPassword ?? "");
+  const newPassword = String(body.newPassword ?? "");
+
+  const check = await verifyPassword(currentPassword, auth.user.passwordHash, config.jwtSecret);
+  if (!check.valid) {
+    return jsonResponse(401, {
+      error: { code: "INVALID_CREDENTIALS", message: "Current password is incorrect", requestId },
+    });
+  }
+  const validation = validatePasswordComplexity(newPassword);
+  if (!validation.isValid) {
+    return jsonResponse(400, {
+      error: {
+        code: "WEAK_PASSWORD",
+        message: "Password does not meet complexity requirements",
+        details: validation.errors,
+        requestId,
+      },
+    });
+  }
+  store.updateUser(auth.user.id, { passwordHash: await hashPassword(newPassword) });
+  // Revoke every other session for this user.
+  const currentToken = bearerToken(request);
+  for (const [token, session] of store.sessions) {
+    if (session.userId === auth.user.id && token !== currentToken) store.sessions.delete(token);
+  }
+  store.persist();
+  return jsonResponse(200, { message: "Password updated" }, { "x-correlation-id": requestId });
+}
+
+async function handleUpdateProject({ request, store, ai, requestId, path }) {
+  const projectId = path.split("/")[4];
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  const body = await parseJsonBody(request);
+  const patch = {};
+  if (body.name !== undefined) {
+    const name = String(body.name).trim();
+    if (!name || name.length > 120) {
+      return jsonResponse(400, {
+        error: {
+          code: "INVALID_INPUT",
+          message: "Project name must be between 1 and 120 characters",
+          requestId,
+        },
+      });
+    }
+    patch.name = name;
+  }
+  if (body.description !== undefined) {
+    const description = String(body.description).trim();
+    if (description.length > 4000) {
+      return jsonResponse(400, {
+        error: {
+          code: "INVALID_INPUT",
+          message: "Description must be at most 4000 characters",
+          requestId,
+        },
+      });
+    }
+    patch.description = description;
+  }
+  for (const key of ["keyFeatures", "techStack"]) {
+    if (body[key] !== undefined) {
+      if (!Array.isArray(body[key])) {
+        return jsonResponse(400, {
+          error: {
+            code: "INVALID_INPUT",
+            message: `${key} must be an array of strings`,
+            requestId,
+          },
+        });
+      }
+      patch[key] = body[key]
+        .map((v) => String(v).trim())
+        .filter(Boolean)
+        .slice(0, 30);
+    }
+  }
+  if (Object.keys(patch).length === 0) {
+    return jsonResponse(400, {
+      error: { code: "INVALID_INPUT", message: "No updatable fields provided", requestId },
+    });
+  }
+  const project = store.updateProject(projectId, patch);
+  store.persist();
+  ai.contextManager.updateProjectInfo?.(projectId, patch);
+  return jsonResponse(200, project, { "x-correlation-id": requestId });
+}
+
+async function handleRetryWorkflow({ request, store, ai, requestId, path }) {
+  const access = requireWorkflowAccess(request, store, ai, path.split("/")[4], requestId);
+  if ("error" in access) return access.error;
+  try {
+    const { workflow } = ai.orchestrator.retryWorkflow(access.workflow.id);
+    return jsonResponse(202, workflow, { "x-correlation-id": requestId });
+  } catch (error) {
+    return workflowErrorResponse(error, requestId, "RETRY_FAILED");
+  }
+}
+
+async function handleCancelWorkflow({ request, store, ai, requestId, path }) {
+  const access = requireWorkflowAccess(request, store, ai, path.split("/")[4], requestId);
+  if ("error" in access) return access.error;
+  try {
+    const workflow = ai.orchestrator.cancelWorkflow(access.workflow.id);
+    return jsonResponse(200, workflow, { "x-correlation-id": requestId });
+  } catch (error) {
+    return workflowErrorResponse(error, requestId, "CANCEL_FAILED");
+  }
 }
 
 async function handleRegister({ request, config, store, registerRateLimiter, requestId }) {
   const body = await parseJsonBody(request);
-  const name = String(body.name ?? '').trim();
-  const email = String(body.email ?? '').trim().toLowerCase();
-  const password = String(body.password ?? '');
+  const name = String(body.name ?? "").trim();
+  const email = String(body.email ?? "")
+    .trim()
+    .toLowerCase();
+  const password = String(body.password ?? "");
 
   // Rate limiting
-  const clientIp = request.headers.get('x-forwarded-for') || 'unknown';
+  const clientIp = request.headers.get("x-forwarded-for") || "unknown";
   if (registerRateLimiter.isLimited(`register:${clientIp}`)) {
     return jsonResponse(429, {
       error: {
-        code: 'RATE_LIMITED',
-        message: 'Too many registration attempts. Please try again later.',
+        code: "RATE_LIMITED",
+        message: "Too many registration attempts. Please try again later.",
         requestId,
       },
     });
@@ -289,8 +669,8 @@ async function handleRegister({ request, config, store, registerRateLimiter, req
   if (!name || !email || password.length < 8) {
     return jsonResponse(400, {
       error: {
-        code: 'INVALID_INPUT',
-        message: 'Name, valid email and password of at least 8 characters are required',
+        code: "INVALID_INPUT",
+        message: "Name, valid email and password of at least 8 characters are required",
         requestId,
       },
     });
@@ -300,8 +680,8 @@ async function handleRegister({ request, config, store, registerRateLimiter, req
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return jsonResponse(400, {
       error: {
-        code: 'INVALID_EMAIL',
-        message: 'Please provide a valid email address',
+        code: "INVALID_EMAIL",
+        message: "Please provide a valid email address",
         requestId,
       },
     });
@@ -312,8 +692,8 @@ async function handleRegister({ request, config, store, registerRateLimiter, req
   if (!passwordValidation.isValid) {
     return jsonResponse(400, {
       error: {
-        code: 'WEAK_PASSWORD',
-        message: 'Password does not meet complexity requirements',
+        code: "WEAK_PASSWORD",
+        message: "Password does not meet complexity requirements",
         details: passwordValidation.errors,
         strength: passwordValidation.strength,
         requestId,
@@ -324,8 +704,8 @@ async function handleRegister({ request, config, store, registerRateLimiter, req
   if (store.getUserByEmail(email)) {
     return jsonResponse(409, {
       error: {
-        code: 'USER_EXISTS',
-        message: 'User with this email already exists',
+        code: "USER_EXISTS",
+        message: "User with this email already exists",
         requestId,
       },
     });
@@ -334,7 +714,7 @@ async function handleRegister({ request, config, store, registerRateLimiter, req
   const user = store.createUser({
     name,
     email,
-    passwordHash: hashPassword(password, config.jwtSecret),
+    passwordHash: await hashPassword(password),
   });
 
   // Generate and set email verification token
@@ -346,7 +726,7 @@ async function handleRegister({ request, config, store, registerRateLimiter, req
     await sendVerificationEmail(email, verificationToken, config.baseUrl);
     verificationEmailSent = true;
   } catch (error) {
-    console.error('Failed to send verification email:', error);
+    console.error("Failed to send verification email:", error);
   }
 
   const response = {
@@ -355,28 +735,30 @@ async function handleRegister({ request, config, store, registerRateLimiter, req
     email: user.email,
     emailVerified: user.emailVerified,
     verificationEmailSent,
-    message: 'Account created. Please check your email to verify.',
+    message: "Account created. Please check your email to verify.",
   };
 
-  if (config.nodeEnv !== 'production') {
+  if (config.nodeEnv !== "production") {
     response.verificationToken = verificationToken;
   }
 
-  return jsonResponse(201, response, { 'x-correlation-id': requestId });
+  return jsonResponse(201, response, { "x-correlation-id": requestId });
 }
 
 async function handleLogin({ request, config, store, loginRateLimiter, requestId }) {
   const body = await parseJsonBody(request);
-  const email = String(body.email ?? '').trim().toLowerCase();
-  const password = String(body.password ?? '');
+  const email = String(body.email ?? "")
+    .trim()
+    .toLowerCase();
+  const password = String(body.password ?? "");
   const rememberMe = Boolean(body.rememberMe ?? false);
 
   // Rate limiting per email
   if (loginRateLimiter.isLimited(`login:${email}`, 5, 15 * 60 * 1000)) {
     return jsonResponse(429, {
       error: {
-        code: 'RATE_LIMITED',
-        message: 'Too many login attempts. Please try again in 15 minutes.',
+        code: "RATE_LIMITED",
+        message: "Too many login attempts. Please try again in 15 minutes.",
         requestId,
       },
     });
@@ -385,19 +767,22 @@ async function handleLogin({ request, config, store, loginRateLimiter, requestId
   if (!email || !password) {
     return jsonResponse(400, {
       error: {
-        code: 'INVALID_INPUT',
-        message: 'Email and password are required',
+        code: "INVALID_INPUT",
+        message: "Email and password are required",
         requestId,
       },
     });
   }
 
   const user = store.getUserByEmail(email);
-  if (!user || user.passwordHash !== hashPassword(password, config.jwtSecret)) {
+  const passwordCheck = user
+    ? await verifyPassword(password, user.passwordHash, config.jwtSecret)
+    : { valid: false };
+  if (!user || !passwordCheck.valid) {
     return jsonResponse(401, {
       error: {
-        code: 'INVALID_CREDENTIALS',
-        message: 'Invalid email or password',
+        code: "INVALID_CREDENTIALS",
+        message: "Invalid email or password",
         requestId,
       },
     });
@@ -406,12 +791,12 @@ async function handleLogin({ request, config, store, loginRateLimiter, requestId
   // Check if email is verified
   if (!user.emailVerified) {
     const error = {
-      code: 'EMAIL_NOT_VERIFIED',
-      message: 'Please verify your email before logging in',
+      code: "EMAIL_NOT_VERIFIED",
+      message: "Please verify your email before logging in",
       requestId,
     };
 
-    if (config.emailProvider === 'demo') {
+    if (config.emailProvider === "demo") {
       error.verificationToken = user.emailVerificationToken;
     }
 
@@ -420,6 +805,10 @@ async function handleLogin({ request, config, store, loginRateLimiter, requestId
         ...error,
       },
     });
+  }
+
+  if (passwordCheck.needsRehash) {
+    store.updateUser(user.id, { passwordHash: await hashPassword(password) });
   }
 
   // Create session with remember-me support
@@ -441,87 +830,108 @@ async function handleLogin({ request, config, store, loginRateLimiter, requestId
 }
 
 async function handleDemoLogin({ config, store, requestId }) {
-  const email = 'demo@helix.app';
+  if (!config.demoLoginEnabled) {
+    return jsonResponse(403, {
+      error: {
+        code: "DEMO_DISABLED",
+        message: "Demo login is disabled on this deployment",
+        requestId,
+      },
+    });
+  }
+  const email = "demo@helix.app";
   let user = store.getUserByEmail(email);
   if (!user) {
     user = store.createUser({
-      name: 'Demo Engineer',
+      name: "Demo Engineer",
       email,
-      passwordHash: hashPassword('HelixDemo2026!', config.jwtSecret),
+      passwordHash: null,
+      emailVerified: true,
+      authProvider: "demo",
     });
   }
-  user.emailVerified = true;
-  user.emailVerificationToken = null;
+  if (!user.emailVerified)
+    store.updateUser(user.id, { emailVerified: true, emailVerificationToken: null });
   const session = store.createSession(user.id, true);
 
-  return jsonResponse(200, {
-    token: session.token,
-    user: {
-      id: user.id,
-      name: user.name,
-      email: user.email,
+  return jsonResponse(
+    200,
+    {
+      token: session.token,
+      user: publicUser(user),
+      expiresAt: session.expiresAt,
+      rememberMe: true,
     },
-    expiresAt: session.expiresAt,
-    rememberMe: true,
-  }, { 'x-correlation-id': requestId });
+    { "x-correlation-id": requestId },
+  );
 }
 
 async function handleListProjects({ request, store, requestId }) {
   const auth = requireAuth(request, store);
-  if ('error' in auth) {
+  if ("error" in auth) {
     return auth.error;
   }
 
   const projects = store.listProjectsForUser(auth.user.id);
-  return jsonResponse(200, projects, { 'x-correlation-id': requestId });
+  return jsonResponse(200, projects, { "x-correlation-id": requestId });
 }
 
 async function handleGetDashboard({ request, store, requestId }) {
   const auth = requireAuth(request, store);
-  if ('error' in auth) {
+  if ("error" in auth) {
     return auth.error;
   }
 
   const projects = store.listProjectsForUser(auth.user.id);
-  const completedProjects = projects.filter((project) => project.status === 'completed').length;
+  const completedProjects = projects.filter((project) => project.status === "completed").length;
 
-  return jsonResponse(200, {
-    user: {
-      id: auth.user.id,
-      name: auth.user.name,
-      email: auth.user.email,
+  return jsonResponse(
+    200,
+    {
+      user: {
+        id: auth.user.id,
+        name: auth.user.name,
+        email: auth.user.email,
+      },
+      projects,
+      stats: {
+        projects: projects.length,
+        activeProjects: projects.length - completedProjects,
+        completedProjects,
+        deployments: 0,
+      },
     },
-    projects,
-    stats: {
-      projects: projects.length,
-      activeProjects: projects.length - completedProjects,
-      completedProjects,
-      deployments: 0,
-    },
-  }, { 'x-correlation-id': requestId });
+    { "x-correlation-id": requestId },
+  );
 }
 
 async function handleCreateProject({ request, store, requestId }) {
   const auth = requireAuth(request, store);
-  if ('error' in auth) {
+  if ("error" in auth) {
     return auth.error;
   }
 
   const body = await parseJsonBody(request);
-  const name = String(body.name ?? '').trim();
-  const description = String(body.description ?? '').trim();
+  const name = String(body.name ?? "").trim();
+  const description = String(body.description ?? "").trim();
   const keyFeatures = Array.isArray(body.keyFeatures)
-    ? body.keyFeatures.map((feature) => String(feature).trim()).filter(Boolean).slice(0, 12)
+    ? body.keyFeatures
+        .map((feature) => String(feature).trim())
+        .filter(Boolean)
+        .slice(0, 12)
     : [];
   const techStack = Array.isArray(body.techStack)
-    ? body.techStack.map((technology) => String(technology).trim()).filter(Boolean).slice(0, 12)
+    ? body.techStack
+        .map((technology) => String(technology).trim())
+        .filter(Boolean)
+        .slice(0, 12)
     : [];
 
   if (!name) {
     return jsonResponse(400, {
       error: {
-        code: 'INVALID_INPUT',
-        message: 'Project name is required',
+        code: "INVALID_INPUT",
+        message: "Project name is required",
         requestId,
       },
     });
@@ -535,31 +945,31 @@ async function handleCreateProject({ request, store, requestId }) {
     techStack,
   });
 
-  return jsonResponse(201, project, { 'x-correlation-id': requestId });
+  return jsonResponse(201, project, { "x-correlation-id": requestId });
 }
 
 async function handleAnalyzeProject({ request, config, store, requestId }) {
   const auth = requireAuth(request, store);
-  if ('error' in auth) {
+  if ("error" in auth) {
     return auth.error;
   }
 
   const body = await parseJsonBody(request);
-  const name = String(body.name ?? '').trim();
-  const description = String(body.description ?? '').trim();
+  const name = String(body.name ?? "").trim();
+  const description = String(body.description ?? "").trim();
   const conversation = Array.isArray(body.conversation)
     ? body.conversation
-      .filter((message) => message && ['user', 'assistant'].includes(message.role))
-      .map((message) => ({ role: message.role, content: String(message.content ?? '').trim() }))
-      .filter((message) => message.content)
-      .slice(-24)
+        .filter((message) => message && ["user", "assistant"].includes(message.role))
+        .map((message) => ({ role: message.role, content: String(message.content ?? "").trim() }))
+        .filter((message) => message.content)
+        .slice(-24)
     : [];
 
   if (!name || !description) {
     return jsonResponse(400, {
       error: {
-        code: 'INVALID_INPUT',
-        message: 'Project name and description are required',
+        code: "INVALID_INPUT",
+        message: "Project name and description are required",
         requestId,
       },
     });
@@ -567,14 +977,15 @@ async function handleAnalyzeProject({ request, config, store, requestId }) {
 
   try {
     const analysis = await analyzeProjectBrief({ name, description, conversation }, config);
-    return jsonResponse(200, analysis, { 'x-correlation-id': requestId });
+    return jsonResponse(200, analysis, { "x-correlation-id": requestId });
   } catch (error) {
-    const code = error?.code ?? 'AI_PROVIDER_ERROR';
-    const status = code === 'AI_NOT_CONFIGURED' ? 503 : 502;
+    const code = error?.code ?? "AI_PROVIDER_ERROR";
+    const status = code === "AI_NOT_CONFIGURED" ? 503 : 502;
     return jsonResponse(status, {
       error: {
         code,
-        message: error instanceof Error ? error.message : 'Project analysis failed. Please try again.',
+        message:
+          error instanceof Error ? error.message : "Project analysis failed. Please try again.",
         requestId,
       },
     });
@@ -583,35 +994,40 @@ async function handleAnalyzeProject({ request, config, store, requestId }) {
 
 async function handleVoiceTurn({ request, config, store, requestId }) {
   const auth = requireAuth(request, store);
-  if ('error' in auth) {
+  if ("error" in auth) {
     return auth.error;
   }
 
   const body = await parseJsonBody(request);
-  const name = String(body.name ?? '').trim();
+  const name = String(body.name ?? "").trim();
   const messages = Array.isArray(body.messages)
     ? body.messages
-      .filter((message) => message && ['user', 'assistant'].includes(message.role))
-      .map((message) => ({ role: message.role, content: String(message.content ?? '').trim() }))
-      .filter((message) => message.content)
-      .slice(-12)
+        .filter((message) => message && ["user", "assistant"].includes(message.role))
+        .map((message) => ({ role: message.role, content: String(message.content ?? "").trim() }))
+        .filter((message) => message.content)
+        .slice(-12)
     : [];
 
-  if (!name || !messages.length || messages[messages.length - 1].role !== 'user') {
+  if (!name || !messages.length || messages[messages.length - 1].role !== "user") {
     return jsonResponse(400, {
-      error: { code: 'INVALID_INPUT', message: 'Project name and a user voice message are required', requestId },
+      error: {
+        code: "INVALID_INPUT",
+        message: "Project name and a user voice message are required",
+        requestId,
+      },
     });
   }
 
   try {
     const reply = await respondToVoiceTurn({ name, messages }, config);
-    return jsonResponse(200, { reply }, { 'x-correlation-id': requestId });
+    return jsonResponse(200, { reply }, { "x-correlation-id": requestId });
   } catch (error) {
-    const code = error?.code ?? 'AI_PROVIDER_ERROR';
-    return jsonResponse(code === 'AI_NOT_CONFIGURED' ? 503 : 502, {
+    const code = error?.code ?? "AI_PROVIDER_ERROR";
+    return jsonResponse(code === "AI_NOT_CONFIGURED" ? 503 : 502, {
       error: {
         code,
-        message: error instanceof Error ? error.message : 'Voice AI could not respond. Please try again.',
+        message:
+          error instanceof Error ? error.message : "Voice AI could not respond. Please try again.",
         requestId,
       },
     });
@@ -620,66 +1036,81 @@ async function handleVoiceTurn({ request, config, store, requestId }) {
 
 async function handleVoiceTranscription({ request, config, store, requestId }) {
   const auth = requireAuth(request, store);
-  if ('error' in auth) return auth.error;
+  if ("error" in auth) return auth.error;
 
   const formData = await request.formData();
-  const file = formData.get('audio');
+  const file = formData.get("audio");
   if (!(file instanceof File)) {
-    return jsonResponse(400, { error: { code: 'INVALID_INPUT', message: 'An audio recording is required', requestId } });
+    return jsonResponse(400, {
+      error: { code: "INVALID_INPUT", message: "An audio recording is required", requestId },
+    });
   }
   if (file.size > 10 * 1024 * 1024) {
-    return jsonResponse(413, { error: { code: 'FILE_TOO_LARGE', message: 'Voice notes must be 10 MB or smaller', requestId } });
+    return jsonResponse(413, {
+      error: { code: "FILE_TOO_LARGE", message: "Voice notes must be 10 MB or smaller", requestId },
+    });
   }
 
   try {
-    const transcript = await transcribeVoiceNote({
-      audio: Buffer.from(await file.arrayBuffer()),
-      mimeType: file.type || 'audio/webm',
-    }, config);
-    return jsonResponse(200, { transcript }, { 'x-correlation-id': requestId });
+    const transcript = await transcribeVoiceNote(
+      {
+        audio: Buffer.from(await file.arrayBuffer()),
+        mimeType: file.type || "audio/webm",
+      },
+      config,
+    );
+    return jsonResponse(200, { transcript }, { "x-correlation-id": requestId });
   } catch (error) {
-    const code = error?.code ?? 'AI_PROVIDER_ERROR';
-    return jsonResponse(code === 'AI_NOT_CONFIGURED' ? 503 : 502, {
-      error: { code, message: error instanceof Error ? error.message : 'Voice transcription failed.', requestId },
+    const code = error?.code ?? "AI_PROVIDER_ERROR";
+    return jsonResponse(code === "AI_NOT_CONFIGURED" ? 503 : 502, {
+      error: {
+        code,
+        message: error instanceof Error ? error.message : "Voice transcription failed.",
+        requestId,
+      },
     });
   }
 }
 
 async function handleExtractProjectDocument({ request, store, requestId }) {
   const auth = requireAuth(request, store);
-  if ('error' in auth) {
+  if ("error" in auth) {
     return auth.error;
   }
 
   const formData = await request.formData();
-  const file = formData.get('file');
+  const file = formData.get("file");
   if (!(file instanceof File)) {
     return jsonResponse(400, {
-      error: { code: 'INVALID_INPUT', message: 'A document file is required', requestId },
+      error: { code: "INVALID_INPUT", message: "A document file is required", requestId },
     });
   }
 
   const maxFileSize = 10 * 1024 * 1024;
   if (file.size > maxFileSize) {
     return jsonResponse(413, {
-      error: { code: 'FILE_TOO_LARGE', message: 'Documents must be 10 MB or smaller', requestId },
+      error: { code: "FILE_TOO_LARGE", message: "Documents must be 10 MB or smaller", requestId },
     });
   }
 
-  const extension = file.name.toLowerCase().split('.').pop();
-  const supportedExtensions = new Set(['docx', 'md', 'markdown', 'txt', 'pdf']);
+  const extension = file.name.toLowerCase().split(".").pop();
+  const supportedExtensions = new Set(["docx", "md", "markdown", "txt", "pdf"]);
   if (!supportedExtensions.has(extension)) {
     return jsonResponse(415, {
-      error: { code: 'UNSUPPORTED_FILE_TYPE', message: 'Upload a PDF, DOCX, Markdown or text document', requestId },
+      error: {
+        code: "UNSUPPORTED_FILE_TYPE",
+        message: "Upload a PDF, DOCX, Markdown or text document",
+        requestId,
+      },
     });
   }
 
   try {
     let text;
-    if (extension === 'docx') {
+    if (extension === "docx") {
       const result = await extractRawText({ buffer: Buffer.from(await file.arrayBuffer()) });
       text = result.value;
-    } else if (extension === 'pdf') {
+    } else if (extension === "pdf") {
       const parser = new PDFParse({ data: Buffer.from(await file.arrayBuffer()) });
       const result = await parser.getText();
       await parser.destroy();
@@ -688,43 +1119,55 @@ async function handleExtractProjectDocument({ request, store, requestId }) {
       text = await file.text();
     }
 
-    const description = text.replace(/\u0000/g, '').trim().slice(0, 30000);
+    const description = text
+      .replace(/\u0000/g, "")
+      .trim()
+      .slice(0, 30000);
     if (!description) {
       return jsonResponse(422, {
-        error: { code: 'EMPTY_DOCUMENT', message: 'The document did not contain readable text', requestId },
+        error: {
+          code: "EMPTY_DOCUMENT",
+          message: "The document did not contain readable text",
+          requestId,
+        },
       });
     }
 
-    return jsonResponse(200, {
-      fileName: file.name,
-      description,
-      truncated: text.trim().length > description.length,
-    }, { 'x-correlation-id': requestId });
+    return jsonResponse(
+      200,
+      {
+        fileName: file.name,
+        description,
+        truncated: text.trim().length > description.length,
+      },
+      { "x-correlation-id": requestId },
+    );
   } catch (error) {
     return jsonResponse(422, {
       error: {
-        code: 'DOCUMENT_PARSE_FAILED',
-        message: error instanceof Error ? `Could not read ${file.name}` : 'Could not read the document',
+        code: "DOCUMENT_PARSE_FAILED",
+        message:
+          error instanceof Error ? `Could not read ${file.name}` : "Could not read the document",
         requestId,
       },
     });
   }
 }
 
-async function handleDeleteProject({ request, store, requestId, path }) {
+async function handleDeleteProject({ request, store, ai, requestId, path }) {
   const auth = requireAuth(request, store);
-  if ('error' in auth) {
+  if ("error" in auth) {
     return auth.error;
   }
 
-  const projectId = path.replace('/api/v1/projects/', '');
+  const projectId = path.replace("/api/v1/projects/", "");
   const project = store.getProjectById(projectId);
 
   if (!project) {
     return jsonResponse(404, {
       error: {
-        code: 'NOT_FOUND',
-        message: 'Project not found',
+        code: "NOT_FOUND",
+        message: "Project not found",
         requestId,
       },
     });
@@ -733,31 +1176,36 @@ async function handleDeleteProject({ request, store, requestId, path }) {
   if (project.ownerId !== auth.user.id) {
     return jsonResponse(403, {
       error: {
-        code: 'FORBIDDEN',
-        message: 'You do not have access to this project',
+        code: "FORBIDDEN",
+        message: "You do not have access to this project",
         requestId,
       },
     });
   }
 
+  ai.orchestrator.removeProject?.(projectId);
   store.deleteProject(projectId);
-  return jsonResponse(200, { message: 'Project deleted', id: projectId }, { 'x-correlation-id': requestId });
+  return jsonResponse(
+    200,
+    { message: "Project deleted", id: projectId },
+    { "x-correlation-id": requestId },
+  );
 }
 
 async function handleGetProject({ request, store, requestId, path }) {
   const auth = requireAuth(request, store);
-  if ('error' in auth) {
+  if ("error" in auth) {
     return auth.error;
   }
 
-  const projectId = path.replace('/api/v1/projects/', '');
+  const projectId = path.replace("/api/v1/projects/", "");
   const project = store.getProjectById(projectId);
 
   if (!project) {
     return jsonResponse(404, {
       error: {
-        code: 'NOT_FOUND',
-        message: 'Project not found',
+        code: "NOT_FOUND",
+        message: "Project not found",
         requestId,
       },
     });
@@ -766,262 +1214,177 @@ async function handleGetProject({ request, store, requestId, path }) {
   if (project.ownerId !== auth.user.id) {
     return jsonResponse(403, {
       error: {
-        code: 'FORBIDDEN',
-        message: 'You do not have access to this project',
+        code: "FORBIDDEN",
+        message: "You do not have access to this project",
         requestId,
       },
     });
   }
 
-  return jsonResponse(200, project, { 'x-correlation-id': requestId });
+  return jsonResponse(200, project, { "x-correlation-id": requestId });
 }
 
-async function handleGoogleCallback({ request, config, store, requestId }) {
+function isConfiguredCredential(value) {
+  return Boolean(value) && !/^your-|-here$/i.test(value);
+}
+
+function upsertOAuthUser(store, { email, name, provider, emailVerified }) {
+  let user = store.getUserByEmail(email);
+  if (!user) {
+    // OAuth accounts have no password; password login is impossible until a reset sets one.
+    user = store.createUser({
+      name,
+      email,
+      passwordHash: null,
+      emailVerified,
+      authProvider: provider,
+    });
+  } else if (emailVerified && !user.emailVerified) {
+    store.updateUser(user.id, { emailVerified: true, emailVerificationToken: null });
+  }
+  return user;
+}
+
+async function handleOAuthCallback({ request, config, store, requestId, provider }) {
   const body = await parseJsonBody(request);
-  const code = String(body.code ?? '').trim();
-  const redirectUri = String(body.redirectUri ?? '').trim() || `${config.baseUrl}/auth/google/callback`;
+  const code = String(body.code ?? "").trim();
+  const redirectUri =
+    String(body.redirectUri ?? "").trim() || `${config.baseUrl}/auth/${provider}/callback`;
+  const codeVerifier = String(body.codeVerifier ?? "").trim();
+  const label = provider === "google" ? "Google" : "GitHub";
 
   if (!code) {
     return jsonResponse(400, {
+      error: { code: "INVALID_INPUT", message: "Authorization code is required", requestId },
+    });
+  }
+
+  const clientId = provider === "google" ? config.googleClientId : config.githubClientId;
+  const clientSecret =
+    provider === "google" ? config.googleClientSecret : config.githubClientSecret;
+  if (!isConfiguredCredential(clientId) || !isConfiguredCredential(clientSecret)) {
+    return jsonResponse(501, {
       error: {
-        code: 'INVALID_INPUT',
-        message: 'Authorization code is required',
+        code: "OAUTH_NOT_CONFIGURED",
+        message: `${label} sign-in is not configured on this server`,
         requestId,
       },
     });
   }
 
   try {
-    // Real OAuth: Exchange code for token with Google
-    if (config.googleClientId && config.googleClientSecret && config.googleClientId !== 'your-google-client-id-here') {
-      const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    let profile;
+    if (provider === "google") {
+      const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
           code,
-          client_id: config.googleClientId,
-          client_secret: config.googleClientSecret,
+          client_id: clientId,
+          client_secret: clientSecret,
           redirect_uri: redirectUri,
-          grant_type: 'authorization_code',
+          grant_type: "authorization_code",
+          ...(codeVerifier ? { code_verifier: codeVerifier } : {}),
         }),
+        signal: AbortSignal.timeout(10000),
       });
-
-      if (!tokenResponse.ok) {
-        throw new Error('Failed to exchange Google token');
-      }
-
+      if (!tokenResponse.ok) throw new Error("Failed to exchange Google token");
       const { access_token } = await tokenResponse.json();
-
-      // Get user info from Google
-      const userResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+      const userResponse = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
         headers: { Authorization: `Bearer ${access_token}` },
+        signal: AbortSignal.timeout(10000),
       });
-
-      if (!userResponse.ok) {
-        throw new Error('Failed to fetch Google user info');
-      }
-
+      if (!userResponse.ok) throw new Error("Failed to fetch Google user info");
       const googleUser = await userResponse.json();
-      const email = googleUser.email.toLowerCase();
-      const name = googleUser.name || 'Google User';
-
-      let user = store.getUserByEmail(email);
-      if (!user) {
-        user = store.createUser({
-          name,
-          email,
-          passwordHash: hashPassword('oauth-user', config.jwtSecret),
-        });
-        // Mark email as verified for OAuth users
-        user.emailVerified = true;
-      }
-
-      const session = store.createSession(user.id);
-
-      return jsonResponse(200, {
-        token: session.token,
-        user: {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-        },
-        expiresAt: session.expiresAt,
-      });
+      if (!googleUser.email) throw new Error("Google account has no email address");
+      profile = {
+        email: googleUser.email.toLowerCase(),
+        name: googleUser.name || "Google User",
+        emailVerified: googleUser.verified_email !== false,
+      };
     } else {
-      // Demo mode: Create or find demo user
-      const email = `google-${randomUUID().slice(0, 8)}@demo.helix.app`;
-      const name = 'Google User';
-
-      let user = store.getUserByEmail(email);
-      if (!user) {
-        user = store.createUser({
-          name,
-          email,
-          passwordHash: hashPassword('oauth-user', config.jwtSecret),
-        });
-        user.emailVerified = true;
-      }
-
-      const session = store.createSession(user.id);
-
-      return jsonResponse(200, {
-        token: session.token,
-        user: {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-        },
-        expiresAt: session.expiresAt,
-      });
-    }
-  } catch (error) {
-    console.error('Google OAuth error:', error);
-    return jsonResponse(400, {
-      error: {
-        code: 'OAUTH_ERROR',
-        message: 'Google authentication failed. ' + (error instanceof Error ? error.message : 'Unknown error'),
-        requestId,
-      },
-    });
-  }
-}
-
-async function handleGitHubCallback({ request, config, store, requestId }) {
-  const body = await parseJsonBody(request);
-  const code = String(body.code ?? '').trim();
-  const redirectUri = String(body.redirectUri ?? '').trim() || `${config.baseUrl}/auth/github/callback`;
-
-  if (!code) {
-    return jsonResponse(400, {
-      error: {
-        code: 'INVALID_INPUT',
-        message: 'Authorization code is required',
-        requestId,
-      },
-    });
-  }
-
-  try {
-    // Real OAuth: Exchange code for token with GitHub
-    if (config.githubClientId && config.githubClientSecret && config.githubClientId !== 'your-github-client-id-here') {
-      const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-        },
+      const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({
           code,
-          client_id: config.githubClientId,
-          client_secret: config.githubClientSecret,
+          client_id: clientId,
+          client_secret: clientSecret,
           redirect_uri: redirectUri,
         }),
+        signal: AbortSignal.timeout(10000),
       });
-
-      if (!tokenResponse.ok) {
-        throw new Error('Failed to exchange GitHub token');
-      }
-
-      const { access_token } = await tokenResponse.json();
-
-      // Get user info from GitHub
-      const userResponse = await fetch('https://api.github.com/user', {
-        headers: { Authorization: `Bearer ${access_token}` },
+      if (!tokenResponse.ok) throw new Error("Failed to exchange GitHub token");
+      const { access_token, error_description } = await tokenResponse.json();
+      if (!access_token)
+        throw new Error(error_description || "GitHub did not return an access token");
+      const headers = { Authorization: `Bearer ${access_token}`, "User-Agent": "helix" };
+      const userResponse = await fetch("https://api.github.com/user", {
+        headers,
+        signal: AbortSignal.timeout(10000),
       });
-
-      if (!userResponse.ok) {
-        throw new Error('Failed to fetch GitHub user info');
-      }
-
+      if (!userResponse.ok) throw new Error("Failed to fetch GitHub user info");
       const githubUser = await userResponse.json();
-      
-      // Get user email from GitHub
-      let email = githubUser.email;
-      if (!email) {
-        const emailResponse = await fetch('https://api.github.com/user/emails', {
-          headers: { Authorization: `Bearer ${access_token}` },
-        });
-        if (emailResponse.ok) {
-          const emails = await emailResponse.json();
-          const primaryEmail = emails.find((e) => e.primary);
-          email = primaryEmail?.email || `${githubUser.login}@github.noreply.com`;
-        }
-      }
-
-      email = email.toLowerCase();
-      const name = githubUser.name || githubUser.login;
-
-      let user = store.getUserByEmail(email);
-      if (!user) {
-        user = store.createUser({
-          name,
-          email,
-          passwordHash: hashPassword('oauth-user', config.jwtSecret),
-        });
-        // Mark email as verified for OAuth users
-        user.emailVerified = true;
-      }
-
-      const session = store.createSession(user.id);
-
-      return jsonResponse(200, {
-        token: session.token,
-        user: {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-        },
-        expiresAt: session.expiresAt,
+      const emailResponse = await fetch("https://api.github.com/user/emails", {
+        headers,
+        signal: AbortSignal.timeout(10000),
       });
-    } else {
-      // Demo mode: Create or find demo user
-      const email = `github-${randomUUID().slice(0, 8)}@demo.helix.app`;
-      const name = 'GitHub User';
-
-      let user = store.getUserByEmail(email);
-      if (!user) {
-        user = store.createUser({
-          name,
-          email,
-          passwordHash: hashPassword('oauth-user', config.jwtSecret),
-        });
-        user.emailVerified = true;
-      }
-
-      const session = store.createSession(user.id);
-
-      return jsonResponse(200, {
-        token: session.token,
-        user: {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-        },
-        expiresAt: session.expiresAt,
-      });
+      const emails = emailResponse.ok ? await emailResponse.json() : [];
+      const primary = Array.isArray(emails) ? emails.find((e) => e.primary && e.verified) : null;
+      const email = primary?.email || githubUser.email;
+      if (!email) throw new Error("GitHub account has no verified email address");
+      profile = {
+        email: email.toLowerCase(),
+        name: githubUser.name || githubUser.login,
+        emailVerified: Boolean(primary),
+      };
     }
+
+    const user = upsertOAuthUser(store, { ...profile, provider });
+    const session = store.createSession(user.id);
+    return jsonResponse(200, {
+      token: session.token,
+      user: publicUser(user),
+      expiresAt: session.expiresAt,
+    });
   } catch (error) {
-    console.error('GitHub OAuth error:', error);
+    console.error(`${label} OAuth error:`, error);
     return jsonResponse(400, {
       error: {
-        code: 'OAUTH_ERROR',
-        message: 'GitHub authentication failed. ' + (error instanceof Error ? error.message : 'Unknown error'),
+        code: "OAUTH_ERROR",
+        message: `${label} authentication failed. ${error instanceof Error ? error.message : "Unknown error"}`,
         requestId,
       },
     });
   }
 }
 
-async function handlePasswordResetRequest({ request, config, store, passwordResetRateLimiter, requestId }) {
+async function handleGoogleCallback(context) {
+  return handleOAuthCallback({ ...context, provider: "google" });
+}
+
+async function handleGitHubCallback(context) {
+  return handleOAuthCallback({ ...context, provider: "github" });
+}
+
+async function handlePasswordResetRequest({
+  request,
+  config,
+  store,
+  passwordResetRateLimiter,
+  requestId,
+}) {
   const body = await parseJsonBody(request);
-  const email = String(body.email ?? '').trim().toLowerCase();
+  const email = String(body.email ?? "")
+    .trim()
+    .toLowerCase();
 
   // Rate limiting per email
   if (passwordResetRateLimiter.isLimited(`reset:${email}`, 3, 60 * 60 * 1000)) {
     return jsonResponse(429, {
       error: {
-        code: 'RATE_LIMITED',
-        message: 'Too many password reset requests. Please try again later.',
+        code: "RATE_LIMITED",
+        message: "Too many password reset requests. Please try again later.",
         requestId,
       },
     });
@@ -1030,8 +1393,8 @@ async function handlePasswordResetRequest({ request, config, store, passwordRese
   if (!email) {
     return jsonResponse(400, {
       error: {
-        code: 'INVALID_INPUT',
-        message: 'Email is required',
+        code: "INVALID_INPUT",
+        message: "Email is required",
         requestId,
       },
     });
@@ -1041,7 +1404,7 @@ async function handlePasswordResetRequest({ request, config, store, passwordRese
   if (!user) {
     // Don't reveal if user exists (security best practice)
     return jsonResponse(200, {
-      message: 'If an account exists with this email, a reset link has been sent.',
+      message: "If an account exists with this email, a reset link has been sent.",
     });
   }
 
@@ -1053,16 +1416,17 @@ async function handlePasswordResetRequest({ request, config, store, passwordRese
   try {
     await sendPasswordResetEmail(email, resetToken, config.baseUrl);
   } catch (error) {
-    console.error('Failed to send password reset email:', error);
+    console.error("Failed to send password reset email:", error);
     // Continue anyway - email is optional in demo mode
   }
 
   const response = {
-    message: 'Password reset link sent to your email.',
+    message: "Password reset link sent to your email.",
   };
 
-  if (config.emailProvider === 'demo') {
-    response.message += ' Demo token: ' + resetToken;
+  if (config.emailProvider === "demo" && config.nodeEnv !== "production") {
+    response.message += " Demo token: " + resetToken;
+    response.resetToken = resetToken;
   }
 
   return jsonResponse(200, response);
@@ -1070,14 +1434,14 @@ async function handlePasswordResetRequest({ request, config, store, passwordRese
 
 async function handlePasswordResetComplete({ request, config, store, requestId }) {
   const body = await parseJsonBody(request);
-  const token = String(body.token ?? '').trim();
-  const password = String(body.password ?? '');
+  const token = String(body.token ?? "").trim();
+  const password = String(body.password ?? "");
 
   if (!token || password.length < 8) {
     return jsonResponse(400, {
       error: {
-        code: 'INVALID_INPUT',
-        message: 'Valid token and password of at least 8 characters are required',
+        code: "INVALID_INPUT",
+        message: "Valid token and password of at least 8 characters are required",
         requestId,
       },
     });
@@ -1088,8 +1452,8 @@ async function handlePasswordResetComplete({ request, config, store, requestId }
   if (!passwordValidation.isValid) {
     return jsonResponse(400, {
       error: {
-        code: 'WEAK_PASSWORD',
-        message: 'Password does not meet complexity requirements',
+        code: "WEAK_PASSWORD",
+        message: "Password does not meet complexity requirements",
         details: passwordValidation.errors,
         strength: passwordValidation.strength,
         requestId,
@@ -1102,8 +1466,8 @@ async function handlePasswordResetComplete({ request, config, store, requestId }
   if (!resetRecord) {
     return jsonResponse(400, {
       error: {
-        code: 'INVALID_TOKEN',
-        message: 'Password reset token is invalid or expired',
+        code: "INVALID_TOKEN",
+        message: "Password reset token is invalid or expired",
         requestId,
       },
     });
@@ -1113,31 +1477,32 @@ async function handlePasswordResetComplete({ request, config, store, requestId }
   if (!user) {
     return jsonResponse(400, {
       error: {
-        code: 'USER_NOT_FOUND',
-        message: 'User not found',
+        code: "USER_NOT_FOUND",
+        message: "User not found",
         requestId,
       },
     });
   }
 
   // Update password
-  user.passwordHash = hashPassword(password, config.jwtSecret);
+  store.updateUser(user.id, { passwordHash: await hashPassword(password) });
   store.deletePasswordReset(token);
+  store.deleteSessionsForUser(user.id);
 
   return jsonResponse(200, {
-    message: 'Password has been reset successfully',
+    message: "Password has been reset successfully",
   });
 }
 
 async function handleVerifyEmail({ request, store, requestId }) {
   const body = await parseJsonBody(request);
-  const token = String(body.token ?? '').trim();
+  const token = String(body.token ?? "").trim();
 
   if (!token) {
     return jsonResponse(400, {
       error: {
-        code: 'INVALID_INPUT',
-        message: 'Verification token is required',
+        code: "INVALID_INPUT",
+        message: "Verification token is required",
         requestId,
       },
     });
@@ -1147,15 +1512,15 @@ async function handleVerifyEmail({ request, store, requestId }) {
   if (!user) {
     return jsonResponse(400, {
       error: {
-        code: 'INVALID_TOKEN',
-        message: 'Email verification token is invalid or expired',
+        code: "INVALID_TOKEN",
+        message: "Email verification token is invalid or expired",
         requestId,
       },
     });
   }
 
   return jsonResponse(200, {
-    message: 'Email verified successfully. You can now login.',
+    message: "Email verified successfully. You can now login.",
     user: {
       id: user.id,
       name: user.name,
@@ -1166,185 +1531,175 @@ async function handleVerifyEmail({ request, store, requestId }) {
 }
 
 async function handleStartProjectWorkflow({ request, store, ai, requestId, path }) {
-  const auth = requireAuth(request, store);
-  if ('error' in auth) return auth.error;
-
-  const projectId = path.split('/')[4];
-  const project = store.getProjectById(projectId);
-  if (!project) {
-    return jsonResponse(404, { error: { code: 'NOT_FOUND', message: 'Project not found', requestId } });
-  }
-  if (project.ownerId !== auth.user.id) {
-    return jsonResponse(403, { error: { code: 'FORBIDDEN', message: 'You do not have access to this project', requestId } });
-  }
+  const projectId = path.split("/")[4];
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  const body = await parseJsonBody(request);
 
   let workflow = ai.orchestrator.getWorkflowForProject(projectId);
-  if (!workflow) {
-    workflow = await ai.orchestrator.createWorkflow(projectId, project);
+  let created = false;
+  try {
+    if (
+      !workflow ||
+      (body.restart === true && ["completed", "failed", "cancelled"].includes(workflow.status))
+    ) {
+      workflow = await ai.orchestrator.createWorkflow(projectId, access.project);
+      created = true;
+    }
+  } catch (error) {
+    return workflowErrorResponse(error, requestId, "WORKFLOW_START_FAILED");
   }
 
-  ai.orchestrator.runNextSteps(workflow.id).catch((err) => {
-    console.error('[Orchestrator background execution error]:', err);
-  });
+  if (workflow.status === "pending") {
+    ai.orchestrator.runNextSteps(workflow.id).catch((err) => {
+      console.error("[Orchestrator background execution error]:", err);
+    });
+  }
 
-  return jsonResponse(201, workflow, { 'x-correlation-id': requestId });
+  return jsonResponse(created ? 201 : 200, workflow, { "x-correlation-id": requestId });
 }
 
 async function handleGetProjectWorkflow({ request, store, ai, requestId, path }) {
-  const auth = requireAuth(request, store);
-  if ('error' in auth) return auth.error;
+  const projectId = path.split("/")[4];
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
 
-  const projectId = path.split('/')[4];
-  const project = store.getProjectById(projectId);
-  if (!project) {
-    return jsonResponse(404, { error: { code: 'NOT_FOUND', message: 'Project not found', requestId } });
-  }
-  if (project.ownerId !== auth.user.id) {
-    return jsonResponse(403, { error: { code: 'FORBIDDEN', message: 'You do not have access to this project', requestId } });
-  }
-
-  let workflow = ai.orchestrator.getWorkflowForProject(projectId);
+  const workflow = ai.orchestrator.getWorkflowForProject(projectId);
   if (!workflow) {
-    workflow = await ai.orchestrator.createWorkflow(projectId, project);
-  }
-
-  return jsonResponse(200, workflow, { 'x-correlation-id': requestId });
-}
-
-async function handleGetProjectOffice({ request, store, ai, requestId, path }) {
-  const auth = requireAuth(request, store);
-  if ('error' in auth) return auth.error;
-
-  const projectId = path.split('/')[4];
-  const project = store.getProjectById(projectId);
-  if (!project) {
-    return jsonResponse(404, { error: { code: 'NOT_FOUND', message: 'Project not found', requestId } });
-  }
-  if (project.ownerId !== auth.user.id) {
-    return jsonResponse(403, { error: { code: 'FORBIDDEN', message: 'You do not have access to this project', requestId } });
-  }
-
-  const officeState = ai.orchestrator.getOfficeFloorState(projectId);
-  return jsonResponse(200, officeState, { 'x-correlation-id': requestId });
-}
-
-async function handleGetProjectArtifacts({ request, store, ai, requestId, path }) {
-  const auth = requireAuth(request, store);
-  if ('error' in auth) return auth.error;
-
-  const projectId = path.split('/')[4];
-  const project = store.getProjectById(projectId);
-  if (!project) {
-    return jsonResponse(404, { error: { code: 'NOT_FOUND', message: 'Project not found', requestId } });
-  }
-  if (project.ownerId !== auth.user.id) {
-    return jsonResponse(403, { error: { code: 'FORBIDDEN', message: 'You do not have access to this project', requestId } });
-  }
-
-  const artifacts = ai.contextManager.getArtifacts(projectId);
-  return jsonResponse(200, { artifacts }, { 'x-correlation-id': requestId });
-}
-
-async function handleApproveWorkflowCheckpoint({ request, store, ai, requestId, path }) {
-  const auth = requireAuth(request, store);
-  if ('error' in auth) return auth.error;
-
-  const workflowId = path.split('/')[4];
-  const body = await parseJsonBody(request);
-  const checkpointType = String(body.checkpointType || '');
-  const approved = body.approved !== false;
-  const comments = String(body.comments || '');
-
-  try {
-    const updatedWorkflow = await ai.orchestrator.approveCheckpoint(workflowId, checkpointType, { approved, comments });
-    return jsonResponse(200, updatedWorkflow, { 'x-correlation-id': requestId });
-  } catch (error) {
-    return jsonResponse(400, {
+    return jsonResponse(404, {
       error: {
-        code: 'APPROVAL_FAILED',
-        message: error.message,
+        code: "NO_WORKFLOW",
+        message: "No workflow has been started for this project",
         requestId,
       },
     });
   }
+  return jsonResponse(200, workflow, { "x-correlation-id": requestId });
+}
+
+async function handleGetProjectOffice({ request, store, ai, requestId, path }) {
+  const projectId = path.split("/")[4];
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  return jsonResponse(200, ai.orchestrator.getOfficeFloorState(projectId), {
+    "x-correlation-id": requestId,
+  });
+}
+
+async function handleGetProjectArtifacts({ request, store, ai, requestId, path }) {
+  const projectId = path.split("/")[4];
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  const artifacts = ai.contextManager.getArtifacts(projectId);
+  return jsonResponse(200, { artifacts }, { "x-correlation-id": requestId });
+}
+
+async function handleApproveWorkflowCheckpoint({ request, store, ai, requestId, path }) {
+  const access = requireWorkflowAccess(request, store, ai, path.split("/")[4], requestId);
+  if ("error" in access) return access.error;
+
+  const body = await parseJsonBody(request);
+  const checkpointType = String(body.checkpointType || "");
+  const approved = body.approved !== false;
+  const revise = body.revise === true;
+  const comments = String(body.comments || "").slice(0, 4000);
+
+  try {
+    const workflow = ai.orchestrator.decideCheckpoint(access.workflow.id, checkpointType, {
+      approved,
+      comments,
+      revise,
+    });
+    if (approved && workflow.status === "running") {
+      const run = ai.orchestrator.runNextSteps(workflow.id);
+      run.catch((err) => console.error("[Orchestrator background execution error]:", err));
+      // Fast pipelines (e.g. local/mock models) report their next state directly; slow ones continue in the background.
+      await waitBriefly(run, 1500);
+    }
+    return jsonResponse(200, ai.orchestrator.getWorkflow(workflow.id), {
+      "x-correlation-id": requestId,
+    });
+  } catch (error) {
+    return workflowErrorResponse(error, requestId, "APPROVAL_FAILED");
+  }
 }
 
 async function handleGetWorkflowTraces({ request, store, ai, requestId, path }) {
-  const auth = requireAuth(request, store);
-  if ('error' in auth) return auth.error;
+  const access = requireWorkflowAccess(request, store, ai, path.split("/")[4], requestId);
+  if ("error" in access) return access.error;
 
-  const workflowId = path.split('/')[4];
-  const traces = ai.observability.getTracesForWorkflow(workflowId);
-  const metrics = ai.observability.getWorkflowMetrics(workflowId);
-
-  return jsonResponse(200, { metrics, traces }, { 'x-correlation-id': requestId });
+  const traces = ai.observability.getTracesForWorkflow(access.workflow.id);
+  const metrics = ai.observability.getWorkflowMetrics(access.workflow.id);
+  return jsonResponse(200, { metrics, traces }, { "x-correlation-id": requestId });
 }
 
 async function handleWorkflowEventsStream({ request, store, ai, requestId, path }) {
   const url = new URL(request.url);
-  const token = url.searchParams.get('token') || (request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
+  // EventSource cannot send headers, so the session token may arrive as a query parameter.
+  const token = url.searchParams.get("token") || bearerToken(request);
   if (!token) {
-    return jsonResponse(401, { error: { code: 'UNAUTHORIZED', message: 'Missing token', requestId } });
+    return jsonResponse(401, {
+      error: { code: "UNAUTHORIZED", message: "Missing token", requestId },
+    });
   }
-
-  const sessionStatus = store.validateSessionExpiration(token);
-  if (!sessionStatus.isValid) {
-    return jsonResponse(401, { error: { code: 'SESSION_EXPIRED', message: 'Invalid or expired session', requestId } });
-  }
-
-  const session = store.getSession(token);
-  if (!session) {
-    return jsonResponse(401, { error: { code: 'UNAUTHORIZED', message: 'Invalid session', requestId } });
-  }
-
-  const projectId = path.split('/')[4];
+  const authed = new Request(request.url, { headers: { authorization: `Bearer ${token}` } });
+  const projectId = path.split("/")[4];
+  const access = requireProjectAccess(authed, store, projectId, requestId);
+  if ("error" in access) return access.error;
 
   let cleanup = null;
   const stream = new ReadableStream({
     start(controller) {
       const encoder = new TextEncoder();
-      const sendData = (payload) => {
+      let closed = false;
+      const write = (text) => {
+        if (closed) return;
         try {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+          controller.enqueue(encoder.encode(text));
         } catch {
-          // Stream might be closed by consumer
+          cleanup?.();
         }
       };
+      const sendData = (payload) =>
+        write(`id: ${payload.id ?? randomUUID()}\ndata: ${JSON.stringify(payload)}\n\n`);
 
-      sendData({ type: 'connected', projectId, timestamp: new Date().toISOString() });
+      write("retry: 3000\n\n");
+      sendData({ type: "connected", projectId, timestamp: new Date().toISOString() });
+      sendData({
+        type: "office_snapshot",
+        timestamp: new Date().toISOString(),
+        payload: ai.orchestrator.getOfficeFloorState(projectId),
+      });
 
       const listener = (event) => {
-        sendData(event);
+        const eventProjectId =
+          event.payload?.projectId ??
+          ai.orchestrator.getWorkflow(event.payload?.workflowId)?.projectId;
+        if (eventProjectId === projectId) sendData(event);
       };
+      ai.observability.on("workflow_event", listener);
 
-      ai.observability.on('workflow_event', listener);
-
-      const heartbeatTimer = setInterval(() => {
-        try {
-          controller.enqueue(encoder.encode(': heartbeat\n\n'));
-        } catch {
-          clearInterval(heartbeatTimer);
-          ai.observability.off('workflow_event', listener);
-        }
-      }, 15000);
+      const heartbeatTimer = setInterval(() => write(": heartbeat\n\n"), 15000);
+      heartbeatTimer.unref?.();
 
       cleanup = () => {
+        if (closed) return;
+        closed = true;
         clearInterval(heartbeatTimer);
-        ai.observability.off('workflow_event', listener);
+        ai.observability.off("workflow_event", listener);
       };
     },
     cancel() {
-      if (cleanup) cleanup();
+      cleanup?.();
     },
   });
 
   return new Response(stream, {
     headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
-      'x-correlation-id': requestId,
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
     },
   });
 }

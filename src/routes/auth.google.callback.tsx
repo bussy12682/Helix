@@ -6,9 +6,7 @@ import { setStoredSessionToken, completeGoogleOAuth } from "@/lib/api";
 
 export const Route = createFileRoute("/auth/google/callback")({
   head: () => ({
-    meta: [
-      { title: "Completing Google sign-in..." },
-    ],
+    meta: [{ title: "Completing Google sign-in..." }],
   }),
   component: GoogleCallback,
 });
@@ -21,24 +19,24 @@ function GoogleCallback() {
     (async () => {
       if (search.error) {
         toast.error(search.error);
-        navigate({ to: '/login' });
+        navigate({ to: "/login" });
         return;
       }
 
       if (!search.code) {
-        toast.error('No authorization code received');
-        navigate({ to: '/login' });
+        toast.error("No authorization code received");
+        navigate({ to: "/login" });
         return;
       }
 
       try {
-        const session = await completeGoogleOAuth(search.code);
+        const session = await completeGoogleOAuth(search.code, search.state);
         setStoredSessionToken(session.token);
-        toast.success('Signed in with Google — loading your dashboard.');
-        navigate({ to: '/dashboard' });
+        toast.success("Signed in with Google — loading your dashboard.");
+        navigate({ to: "/dashboard" });
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : 'Failed to complete Google sign-in');
-        navigate({ to: '/login' });
+        toast.error(error instanceof Error ? error.message : "Failed to complete Google sign-in");
+        navigate({ to: "/login" });
       }
     })();
   }, [search, navigate]);

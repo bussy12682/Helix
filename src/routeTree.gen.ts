@@ -10,14 +10,11 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as BillingRouteImport } from './routes/billing'
 import { Route as CallRouteImport } from './routes/call'
 import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as DeploymentsRouteImport } from './routes/deployments'
 import { Route as ForgotPasswordRouteImport } from './routes/forgot-password'
-import { Route as IntegrationsRouteImport } from './routes/integrations'
 import { Route as LoginRouteImport } from './routes/login'
-import { Route as MaintenanceRouteImport } from './routes/maintenance'
 import { Route as OfficeRouteImport } from './routes/office'
 import { Route as ProjectsRouteImport } from './routes/projects'
 import { Route as SecurityRouteImport } from './routes/security'
@@ -35,11 +32,6 @@ import { Route as AuthGoogleCallbackRouteImport } from './routes/auth.google.cal
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const BillingRoute = BillingRouteImport.update({
-  id: '/billing',
-  path: '/billing',
   getParentRoute: () => rootRouteImport,
 } as any)
 const CallRoute = CallRouteImport.update({
@@ -62,19 +54,9 @@ const ForgotPasswordRoute = ForgotPasswordRouteImport.update({
   path: '/forgot-password',
   getParentRoute: () => rootRouteImport,
 } as any)
-const IntegrationsRoute = IntegrationsRouteImport.update({
-  id: '/integrations',
-  path: '/integrations',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const MaintenanceRoute = MaintenanceRouteImport.update({
-  id: '/maintenance',
-  path: '/maintenance',
   getParentRoute: () => rootRouteImport,
 } as any)
 const OfficeRoute = OfficeRouteImport.update({
@@ -145,14 +127,11 @@ const AuthGoogleCallbackRoute = AuthGoogleCallbackRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/billing': typeof BillingRoute
   '/call': typeof CallRoute
   '/dashboard': typeof DashboardRoute
   '/deployments': typeof DeploymentsRoute
   '/forgot-password': typeof ForgotPasswordRoute
-  '/integrations': typeof IntegrationsRoute
   '/login': typeof LoginRoute
-  '/maintenance': typeof MaintenanceRoute
   '/office': typeof OfficeRouteWithChildren
   '/projects': typeof ProjectsRouteWithChildren
   '/security': typeof SecurityRoute
@@ -169,14 +148,11 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/billing': typeof BillingRoute
   '/call': typeof CallRoute
   '/dashboard': typeof DashboardRoute
   '/deployments': typeof DeploymentsRoute
   '/forgot-password': typeof ForgotPasswordRoute
-  '/integrations': typeof IntegrationsRoute
   '/login': typeof LoginRoute
-  '/maintenance': typeof MaintenanceRoute
   '/security': typeof SecurityRoute
   '/settings': typeof SettingsRoute
   '/signup': typeof SignupRoute
@@ -192,14 +168,11 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/billing': typeof BillingRoute
   '/call': typeof CallRoute
   '/dashboard': typeof DashboardRoute
   '/deployments': typeof DeploymentsRoute
   '/forgot-password': typeof ForgotPasswordRoute
-  '/integrations': typeof IntegrationsRoute
   '/login': typeof LoginRoute
-  '/maintenance': typeof MaintenanceRoute
   '/office': typeof OfficeRouteWithChildren
   '/projects': typeof ProjectsRouteWithChildren
   '/security': typeof SecurityRoute
@@ -218,14 +191,11 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/billing'
     | '/call'
     | '/dashboard'
     | '/deployments'
     | '/forgot-password'
-    | '/integrations'
     | '/login'
-    | '/maintenance'
     | '/office'
     | '/projects'
     | '/security'
@@ -242,14 +212,11 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
-    | '/billing'
     | '/call'
     | '/dashboard'
     | '/deployments'
     | '/forgot-password'
-    | '/integrations'
     | '/login'
-    | '/maintenance'
     | '/security'
     | '/settings'
     | '/signup'
@@ -264,14 +231,11 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
-    | '/billing'
     | '/call'
     | '/dashboard'
     | '/deployments'
     | '/forgot-password'
-    | '/integrations'
     | '/login'
-    | '/maintenance'
     | '/office'
     | '/projects'
     | '/security'
@@ -289,14 +253,11 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  BillingRoute: typeof BillingRoute
   CallRoute: typeof CallRoute
   DashboardRoute: typeof DashboardRoute
   DeploymentsRoute: typeof DeploymentsRoute
   ForgotPasswordRoute: typeof ForgotPasswordRoute
-  IntegrationsRoute: typeof IntegrationsRoute
   LoginRoute: typeof LoginRoute
-  MaintenanceRoute: typeof MaintenanceRoute
   OfficeRoute: typeof OfficeRouteWithChildren
   ProjectsRoute: typeof ProjectsRouteWithChildren
   SecurityRoute: typeof SecurityRoute
@@ -314,13 +275,6 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/billing': {
-      id: '/billing'
-      path: '/billing'
-      fullPath: '/billing'
-      preLoaderRoute: typeof BillingRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/call': {
@@ -351,25 +305,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ForgotPasswordRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/integrations': {
-      id: '/integrations'
-      path: '/integrations'
-      fullPath: '/integrations'
-      preLoaderRoute: typeof IntegrationsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/login': {
       id: '/login'
       path: '/login'
       fullPath: '/login'
       preLoaderRoute: typeof LoginRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/maintenance': {
-      id: '/maintenance'
-      path: '/maintenance'
-      fullPath: '/maintenance'
-      preLoaderRoute: typeof MaintenanceRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/office': {
@@ -497,14 +437,11 @@ const ProjectsRouteWithChildren = ProjectsRoute._addFileChildren(
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  BillingRoute: BillingRoute,
   CallRoute: CallRoute,
   DashboardRoute: DashboardRoute,
   DeploymentsRoute: DeploymentsRoute,
   ForgotPasswordRoute: ForgotPasswordRoute,
-  IntegrationsRoute: IntegrationsRoute,
   LoginRoute: LoginRoute,
-  MaintenanceRoute: MaintenanceRoute,
   OfficeRoute: OfficeRouteWithChildren,
   ProjectsRoute: ProjectsRouteWithChildren,
   SecurityRoute: SecurityRoute,

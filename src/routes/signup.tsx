@@ -9,15 +9,34 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
-import { ApiRequestError, registerUser, setStoredSessionToken, initiateGoogleOAuth, initiateGitHubOAuth, validatePasswordComplexity } from "@/lib/api";
+import {
+  ApiRequestError,
+  registerUser,
+  setStoredSessionToken,
+  initiateGoogleOAuth,
+  initiateGitHubOAuth,
+  validatePasswordComplexity,
+} from "@/lib/api";
 
 function GoogleLogo(props: React.SVGProps<SVGSVGElement>) {
   return (
     <svg {...props} viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
-      <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
-      <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
-      <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
-      <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+      <path
+        d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+        fill="#4285F4"
+      />
+      <path
+        d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+        fill="#34A853"
+      />
+      <path
+        d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"
+        fill="#FBBC05"
+      />
+      <path
+        d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
+        fill="#EA4335"
+      />
     </svg>
   );
 }
@@ -28,7 +47,8 @@ export const Route = createFileRoute("/signup")({
       { title: "Create your HELIX account" },
       {
         name: "description",
-        content: "Start building with your AI engineering team. Free 14-day trial, no card required.",
+        content:
+          "Start building with your AI engineering team. Free 14-day trial, no card required.",
       },
       { property: "og:title", content: "Create your HELIX account" },
       { property: "og:description", content: "Start building with your AI engineering team." },
@@ -135,8 +155,8 @@ function SignUp() {
               toast.success("Account created successfully!");
             }
             navigate({
-              to: "/verify-email", 
-              search: { email: payload.email, token: result.verificationToken }
+              to: "/verify-email",
+              search: { email: payload.email, token: result.verificationToken },
             });
           } catch (error) {
             const message = error instanceof Error ? error.message : "Registration failed.";
@@ -210,30 +230,70 @@ function SignUp() {
           <div className="mt-2 space-y-1.5 rounded-lg border border-border/60 bg-muted/30 p-2.5 text-xs">
             <div className="flex items-center justify-between pb-1 border-b border-border/40">
               <span className="text-muted-foreground">Password strength:</span>
-              <span className={`font-semibold capitalize ${
-                passwordValidation.strength === 'weak' ? 'text-destructive' :
-                passwordValidation.strength === 'fair' ? 'text-amber-500' :
-                passwordValidation.strength === 'good' ? 'text-blue-500' :
-                'text-emerald-500'
-              }`}>
+              <span
+                className={`font-semibold capitalize ${
+                  passwordValidation.strength === "weak"
+                    ? "text-destructive"
+                    : passwordValidation.strength === "fair"
+                      ? "text-amber-500"
+                      : passwordValidation.strength === "good"
+                        ? "text-blue-500"
+                        : "text-emerald-500"
+                }`}
+              >
                 {password ? passwordValidation.strength : "Not entered"}
               </span>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-[11px] pt-1">
-              <span className={`flex items-center gap-1.5 ${hasMinLen ? 'text-emerald-600 dark:text-emerald-400 font-medium' : 'text-muted-foreground'}`}>
-                {hasMinLen ? <Check className="h-3.5 w-3.5" /> : <X className="h-3.5 w-3.5 text-muted-foreground/60" />} 8+ characters
+              <span
+                className={`flex items-center gap-1.5 ${hasMinLen ? "text-emerald-600 dark:text-emerald-400 font-medium" : "text-muted-foreground"}`}
+              >
+                {hasMinLen ? (
+                  <Check className="h-3.5 w-3.5" />
+                ) : (
+                  <X className="h-3.5 w-3.5 text-muted-foreground/60" />
+                )}{" "}
+                8+ characters
               </span>
-              <span className={`flex items-center gap-1.5 ${hasUpper ? 'text-emerald-600 dark:text-emerald-400 font-medium' : 'text-muted-foreground'}`}>
-                {hasUpper ? <Check className="h-3.5 w-3.5" /> : <X className="h-3.5 w-3.5 text-muted-foreground/60" />} Uppercase letter (A-Z)
+              <span
+                className={`flex items-center gap-1.5 ${hasUpper ? "text-emerald-600 dark:text-emerald-400 font-medium" : "text-muted-foreground"}`}
+              >
+                {hasUpper ? (
+                  <Check className="h-3.5 w-3.5" />
+                ) : (
+                  <X className="h-3.5 w-3.5 text-muted-foreground/60" />
+                )}{" "}
+                Uppercase letter (A-Z)
               </span>
-              <span className={`flex items-center gap-1.5 ${hasLower ? 'text-emerald-600 dark:text-emerald-400 font-medium' : 'text-muted-foreground'}`}>
-                {hasLower ? <Check className="h-3.5 w-3.5" /> : <X className="h-3.5 w-3.5 text-muted-foreground/60" />} Lowercase letter (a-z)
+              <span
+                className={`flex items-center gap-1.5 ${hasLower ? "text-emerald-600 dark:text-emerald-400 font-medium" : "text-muted-foreground"}`}
+              >
+                {hasLower ? (
+                  <Check className="h-3.5 w-3.5" />
+                ) : (
+                  <X className="h-3.5 w-3.5 text-muted-foreground/60" />
+                )}{" "}
+                Lowercase letter (a-z)
               </span>
-              <span className={`flex items-center gap-1.5 ${hasNumber ? 'text-emerald-600 dark:text-emerald-400 font-medium' : 'text-muted-foreground'}`}>
-                {hasNumber ? <Check className="h-3.5 w-3.5" /> : <X className="h-3.5 w-3.5 text-muted-foreground/60" />} Number (0-9)
+              <span
+                className={`flex items-center gap-1.5 ${hasNumber ? "text-emerald-600 dark:text-emerald-400 font-medium" : "text-muted-foreground"}`}
+              >
+                {hasNumber ? (
+                  <Check className="h-3.5 w-3.5" />
+                ) : (
+                  <X className="h-3.5 w-3.5 text-muted-foreground/60" />
+                )}{" "}
+                Number (0-9)
               </span>
-              <span className={`col-span-1 sm:col-span-2 flex items-center gap-1.5 ${hasSpecial ? 'text-emerald-600 dark:text-emerald-400 font-medium' : 'text-muted-foreground'}`}>
-                {hasSpecial ? <Check className="h-3.5 w-3.5" /> : <X className="h-3.5 w-3.5 text-muted-foreground/60" />} Special character (!@#$%...)
+              <span
+                className={`col-span-1 sm:col-span-2 flex items-center gap-1.5 ${hasSpecial ? "text-emerald-600 dark:text-emerald-400 font-medium" : "text-muted-foreground"}`}
+              >
+                {hasSpecial ? (
+                  <Check className="h-3.5 w-3.5" />
+                ) : (
+                  <X className="h-3.5 w-3.5 text-muted-foreground/60" />
+                )}{" "}
+                Special character (!@#$%...)
               </span>
             </div>
           </div>
@@ -258,12 +318,16 @@ function SignUp() {
       </div>
 
       <div className="space-y-2">
-        <Button 
-          variant="outline" 
-          className="w-full" 
+        <Button
+          variant="outline"
+          className="w-full"
           onClick={async () => {
-            const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
-            if (!clientId || clientId === "your-google-client-id-here" || clientId === "demo-client-id") {
+            const clientId = import.meta.env["VITE_GOOGLE_CLIENT_ID"];
+            if (
+              !clientId ||
+              clientId === "your-google-client-id-here" ||
+              clientId === "demo-client-id"
+            ) {
               toast.error("Google OAuth is not configured. Please use email/password signup.");
               return;
             }
@@ -276,12 +340,16 @@ function SignUp() {
         >
           <GoogleLogo className="mr-2 h-4 w-4" /> Continue with Google
         </Button>
-        <Button 
-          variant="outline" 
-          className="w-full" 
+        <Button
+          variant="outline"
+          className="w-full"
           onClick={async () => {
-            const clientId = import.meta.env.VITE_GITHUB_CLIENT_ID;
-            if (!clientId || clientId === "your-github-client-id-here" || clientId === "demo-client-id") {
+            const clientId = import.meta.env["VITE_GITHUB_CLIENT_ID"];
+            if (
+              !clientId ||
+              clientId === "your-github-client-id-here" ||
+              clientId === "demo-client-id"
+            ) {
               toast.error("GitHub OAuth is not configured. Please use email/password signup.");
               return;
             }

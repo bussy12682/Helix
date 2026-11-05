@@ -1,34 +1,27 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
   Activity,
-  Bell,
   Boxes,
-  CreditCard,
   LayoutDashboard,
-  Plug,
+  LogOut,
   Rocket,
-  Search,
   Settings,
   Shield,
   Users,
-  Wrench,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { HelixLogo } from "./logo";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { getCurrentUser, getStoredSessionToken, logout, type CurrentUser } from "@/lib/api";
 
 const nav = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { to: "/projects", label: "Projects", icon: Boxes },
   { to: "/office", label: "AI Office", icon: Users },
   { to: "/office/tasks", label: "Activity", icon: Activity },
-  { to: "/integrations", label: "Integrations", icon: Plug },
   { to: "/deployments", label: "Deployments", icon: Rocket },
-  { to: "/maintenance", label: "Maintenance", icon: Wrench },
   { to: "/security", label: "Security", icon: Shield },
-  { to: "/billing", label: "Billing & Plan", icon: CreditCard },
   { to: "/settings", label: "Settings", icon: Settings },
 ] as const;
 
@@ -43,6 +36,33 @@ export function AppShell({
   action?: ReactNode;
   children: ReactNode;
 }) {
+  const navigate = useNavigate();
+  const [user, setUser] = useState<CurrentUser | null>(null);
+
+  useEffect(() => {
+    const token = getStoredSessionToken();
+    if (!token) return;
+    getCurrentUser(token)
+      .then((res) => setUser(res.user))
+      .catch((err) => {
+        if (["SESSION_EXPIRED", "INVALID_SESSION", "UNAUTHORIZED"].includes(err?.code)) {
+          void logout().then(() => navigate({ to: "/login" }));
+        }
+      });
+  }, [navigate]);
+
+  async function handleLogout() {
+    await logout();
+    void navigate({ to: "/login" });
+  }
+
+  const initials = (user?.name ?? "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("");
+
   return (
     <div className="min-h-screen bg-background">
       <div className="mx-auto flex max-w-[1600px]">
@@ -56,8 +76,7 @@ export function AppShell({
                 activeOptions={{ exact: item.to === "/office" }}
                 className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
                 activeProps={{
-                  className:
-                    "bg-sidebar-accent text-sidebar-accent-foreground font-semibold",
+                  className: "bg-sidebar-accent text-sidebar-accent-foreground font-semibold",
                 }}
               >
                 <item.icon className="h-4 w-4" />
@@ -66,13 +85,22 @@ export function AppShell({
             ))}
           </nav>
           <div className="mt-4 flex items-center gap-3 rounded-xl border border-sidebar-border bg-card p-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
-              EF
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+              {initials || "?"}
             </div>
-            <div className="min-w-0">
-              <p className="truncate text-sm font-medium">Enoch F.</p>
-              <p className="truncate text-xs text-muted-foreground">Pro Plan</p>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium">{user?.name ?? "Loading…"}</p>
+              <p className="truncate text-xs text-muted-foreground">{user?.email ?? ""}</p>
             </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Log out"
+              title="Log out"
+              onClick={() => void handleLogout()}
+            >
+              <LogOut className="h-4 w-4" />
+            </Button>
           </div>
         </aside>
 
@@ -85,18 +113,16 @@ export function AppShell({
                   <p className="truncate text-sm text-muted-foreground">{subtitle}</p>
                 ) : null}
               </div>
-              <div className="relative hidden md:block">
-                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  placeholder="Search projects, agents…"
-                  className="w-64 pl-9"
-                  aria-label="Search"
-                />
-              </div>
-              <Button variant="ghost" size="icon" aria-label="Notifications">
-                <Bell className="h-4 w-4" />
-              </Button>
               {action}
+              <Button
+                variant="ghost"
+                size="icon"
+                className="lg:hidden"
+                aria-label="Log out"
+                onClick={() => void handleLogout()}
+              >
+                <LogOut className="h-4 w-4" />
+              </Button>
             </div>
             <div className="flex gap-1 overflow-x-auto px-3 pb-2 lg:hidden">
               {nav.map((item) => (

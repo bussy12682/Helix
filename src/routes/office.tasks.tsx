@@ -1,8 +1,9 @@
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { ArrowLeft, Code2, FileCode, FileText, Eye, CheckCircle2 } from "lucide-react";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { ArrowLeft, Code2, FileCode, FileText } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { AppShell, Meter, Panel, StatusPill } from "@/components/helix/app-shell";
+import { ProviderBadge, taskStatusLabel, taskTone } from "@/components/helix/workflow-ui";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -12,102 +13,50 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  getProjectArtifacts,
-  getProjectOffice,
-  getStoredSessionToken,
-  listProjects,
-  type OfficeFloorState,
-} from "@/lib/api";
+import { getStoredSessionToken, getWorkflowTraces, type Artifact, type TraceSpan } from "@/lib/api";
+import { useActiveProject } from "@/lib/use-active-project";
+import { useWorkflowStream } from "@/lib/use-workflow-stream";
 
 export const Route = createFileRoute("/office/tasks")({
   head: () => ({
     meta: [
       { title: "Task Assignment Flow & Artifacts — HELIX" },
-      { name: "description", content: "See how the Project Manager AI assigns and tracks every task across your agents and view generated artifacts." },
+      {
+        name: "description",
+        content:
+          "See how the Project Manager AI assigns and tracks every task across your agents and view generated artifacts.",
+      },
       { property: "og:title", content: "Task Assignment Flow & Artifacts — HELIX" },
-      { property: "og:description", content: "Live task log and generated files across all nine agents." },
+      {
+        property: "og:description",
+        content: "Live task log and generated files across all nine agents.",
+      },
     ],
   }),
   component: TaskFlow,
 });
 
-type Artifact = {
-  name: string;
-  type: string;
-  path: string;
-  content: string;
-  version: number;
-};
-
 function TaskFlow() {
-  const navigate = useNavigate();
-  const [projectId, setProjectId] = useState<string | null>(() => {
-    if (typeof window === "undefined") return null;
-    return window.sessionStorage.getItem("helix_active_project_id");
-  });
-  const [floorState, setFloorState] = useState<OfficeFloorState | null>(null);
-  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
-  const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null);
+  const { projectId } = useActiveProject();
+  const { floorState, artifacts } = useWorkflowStream(projectId, { withArtifacts: true });
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [traces, setTraces] = useState<TraceSpan[]>([]);
+  const selectedArtifact: Artifact | null =
+    artifacts.find((a) => a.path === selectedPath) ?? artifacts[0] ?? null;
+  const completedCount = floorState?.tasks.filter((t) => t.status === "completed").length ?? 0;
 
   useEffect(() => {
     const token = getStoredSessionToken();
-    if (!token) {
-      navigate({ to: "/login" });
-      return;
-    }
-
-    async function loadData() {
-      try {
-        let currentId = projectId;
-        if (!currentId) {
-          const projects = await listProjects(token);
-          if (projects.length > 0) {
-            currentId = projects[0].id;
-            setProjectId(currentId);
-            window.sessionStorage.setItem("helix_active_project_id", currentId);
-          }
-        }
-
-        if (currentId) {
-          const [office, arts] = await Promise.all([
-            getProjectOffice(currentId, token),
-            getProjectArtifacts(currentId, token),
-          ]);
-          setFloorState(office);
-          setArtifacts(arts.artifacts || []);
-          if (arts.artifacts && arts.artifacts.length > 0 && !selectedArtifact) {
-            setSelectedArtifact(arts.artifacts[0]);
-          }
-        }
-      } catch (err) {
-        console.error("Failed to load task flow:", err);
-      }
-    }
-
-    void loadData();
-
-    const interval = setInterval(async () => {
-      const activeToken = getStoredSessionToken();
-      if (!activeToken || !projectId) return;
-      try {
-        const [office, arts] = await Promise.all([
-          getProjectOffice(projectId, activeToken),
-          getProjectArtifacts(projectId, activeToken),
-        ]);
-        setFloorState(office);
-        setArtifacts(arts.artifacts || []);
-      } catch {
-        // Suppress polling errors
-      }
-    }, 4000);
-
-    return () => clearInterval(interval);
-  }, [projectId, navigate]);
+    const workflowId = floorState?.workflowId;
+    if (!token || !workflowId) return;
+    getWorkflowTraces(workflowId, token)
+      .then((res) => setTraces(res.traces))
+      .catch(() => setTraces([]));
+  }, [floorState?.workflowId, completedCount]);
 
   return (
     <AppShell
-      title="Task Assignment Flow &amp; Artifacts"
+      title="Task Assignment Flow & Artifacts"
       subtitle="Coordinated execution log and generated files across all 9 agents"
       action={
         <Button asChild variant="outline">
@@ -132,10 +81,21 @@ function TaskFlow() {
               <TableBody>
                 {(floorState?.tasks || []).map((t) => (
                   <TableRow key={t.id}>
-                    <TableCell className="text-xs font-semibold">{t.agent}</TableCell>
+                    <TableCell className="text-xs font-semibold">
+                      {t.agent}
+                      <div className="mt-1">
+                        <ProviderBadge
+                          provider={t.provider}
+                          model={t.model}
+                          simulated={t.simulated}
+                        />
+                      </div>
+                    </TableCell>
                     <TableCell>
                       <p className="text-xs font-medium">{t.task}</p>
-                      {t.summary && <p className="mt-0.5 text-[11px] text-muted-foreground">{t.summary}</p>}
+                      {t.summary && (
+                        <p className="mt-0.5 text-[11px] text-muted-foreground">{t.summary}</p>
+                      )}
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-2">
@@ -146,14 +106,8 @@ function TaskFlow() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <StatusPill tone={t.status === "completed" ? "done" : t.status === "running" ? "working" : t.status === "awaiting_approval" ? "queued" : "idle"}>
-                        {t.status === "completed"
-                          ? "Done"
-                          : t.status === "running"
-                            ? "Working"
-                            : t.status === "awaiting_approval"
-                              ? "Approval"
-                              : "Queued"}
+                      <StatusPill tone={taskTone(t.status)}>
+                        {taskStatusLabel[t.status] ?? t.status}
                       </StatusPill>
                     </TableCell>
                   </TableRow>
@@ -162,8 +116,47 @@ function TaskFlow() {
             </Table>
           </Panel>
 
+          <Panel
+            title="Execution Traces"
+            description="Recorded model calls per agent (provider, latency, tokens)"
+          >
+            {traces.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No agent executions recorded yet.</p>
+            ) : (
+              <ul className="divide-y divide-border">
+                {traces.map((span) => (
+                  <li key={span.spanId} className="flex flex-wrap items-center gap-2 py-2 text-xs">
+                    <span className="font-semibold">{span.agentRole.replace(/_/g, " ")}</span>
+                    <StatusPill tone={span.status === "completed" ? "done" : "danger"}>
+                      {span.status}
+                    </StatusPill>
+                    <ProviderBadge
+                      provider={span.provider}
+                      model={span.model}
+                      simulated={span.provider === "mock"}
+                    />
+                    <span className="tabular-nums text-muted-foreground">
+                      {(span.durationMs / 1000).toFixed(1)}s
+                    </span>
+                    {span.usage?.total_tokens ? (
+                      <span className="tabular-nums text-muted-foreground">
+                        {span.usage.total_tokens} tokens
+                      </span>
+                    ) : null}
+                    {span.error && (
+                      <span className="w-full break-words text-destructive">{span.error}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Panel>
+
           {/* Generated Artifacts Section */}
-          <Panel title="Generated Engineering Artifacts" description="Files created by the specialized agents in the virtual workspace">
+          <Panel
+            title="Generated Engineering Artifacts"
+            description="Files created by the specialized agents in the virtual workspace"
+          >
             {artifacts.length === 0 ? (
               <p className="text-xs text-muted-foreground">
                 No artifacts generated yet. They will appear here as agents complete their tasks.
@@ -174,7 +167,7 @@ function TaskFlow() {
                   <button
                     key={art.path}
                     type="button"
-                    onClick={() => setSelectedArtifact(art)}
+                    onClick={() => setSelectedPath(art.path)}
                     className={`flex items-start gap-2.5 rounded-lg border p-2.5 text-left transition-colors ${
                       selectedArtifact?.path === art.path
                         ? "border-primary bg-primary/5"
@@ -205,7 +198,11 @@ function TaskFlow() {
         {/* Selected Artifact Code/Spec Viewer */}
         <Panel
           title={selectedArtifact ? selectedArtifact.name : "Artifact Viewer"}
-          description={selectedArtifact ? `${selectedArtifact.path} (v${selectedArtifact.version})` : "Select a generated file to inspect"}
+          description={
+            selectedArtifact
+              ? `${selectedArtifact.path} (v${selectedArtifact.version})`
+              : "Select a generated file to inspect"
+          }
         >
           {selectedArtifact ? (
             <div className="space-y-3">

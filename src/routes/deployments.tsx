@@ -1,98 +1,115 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { ExternalLink } from "lucide-react";
+import { createFileRoute, Link } from "@tanstack/react-router";
 
 import { AppShell, Panel, StatusPill } from "@/components/helix/app-shell";
-import { deployments } from "@/components/helix/data";
+import { ProviderBadge, taskStatusLabel, taskTone } from "@/components/helix/workflow-ui";
 import { Button } from "@/components/ui/button";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { useActiveProject } from "@/lib/use-active-project";
+import { useWorkflowStream } from "@/lib/use-workflow-stream";
 
 export const Route = createFileRoute("/deployments")({
   head: () => ({
     meta: [
-      { title: "Deployment Overview — HELIX" },
-      { name: "description", content: "Production, staging and development environments deployed and monitored by DevOps AI." },
-      { property: "og:title", content: "Deployment Overview — HELIX" },
-      { property: "og:description", content: "Every environment, build and release in one view." },
+      { title: "Deployment Readiness — HELIX" },
+      {
+        name: "description",
+        content:
+          "Containerization, CI/CD pipelines and release approval produced by the DevOps Engineer AI.",
+      },
+      { property: "og:title", content: "Deployment Readiness — HELIX" },
+      {
+        property: "og:description",
+        content: "Release gate and deployment configuration for your project.",
+      },
     ],
   }),
   component: Deployments,
 });
 
-const recent = [
-  { build: "#1292", env: "Development", time: "May 16, 21:33 UTC", status: "Building" },
-  { build: "#1291", env: "Staging", time: "May 16, 21:10 UTC", status: "Success" },
-  { build: "#1290", env: "Staging", time: "May 16, 20:52 UTC", status: "Success" },
-  { build: "#1284", env: "Production", time: "May 16, 20:41 UTC", status: "Success" },
-  { build: "#1283", env: "Production", time: "May 15, 18:02 UTC", status: "Rolled back" },
-];
-
 function Deployments() {
-  return (
-    <AppShell title="Deployment Overview" subtitle="Managed continuously by DevOps AI">
-      <div className="grid gap-4 lg:grid-cols-3">
-        {deployments.map((d) => (
-          <Panel key={d.env} title={d.env} description={d.url}>
-            <StatusPill tone={d.status === "Live" ? "live" : "working"}>{d.status}</StatusPill>
-            <dl className="mt-4 space-y-2 text-sm">
-              <div className="flex justify-between">
-                <dt className="text-muted-foreground">Build</dt>
-                <dd className="font-medium">{d.build}</dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className="text-muted-foreground">Deployed</dt>
-                <dd className="font-medium">{d.time}</dd>
-              </div>
-            </dl>
-            <Button variant="outline" size="sm" className="mt-4 w-full" asChild>
-              <a href={`https://${d.url}`} target="_blank" rel="noreferrer">
-                Visit <ExternalLink className="ml-1.5 h-3.5 w-3.5" />
-              </a>
-            </Button>
-          </Panel>
-        ))}
-      </div>
+  const { project, projectId } = useActiveProject();
+  const { floorState, artifacts } = useWorkflowStream(projectId, { withArtifacts: true });
 
-      <Panel className="mt-5" title="Recent Deployments" description="Last 5 builds">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Build</TableHead>
-              <TableHead>Environment</TableHead>
-              <TableHead>Time</TableHead>
-              <TableHead className="w-36">Status</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {recent.map((r) => (
-              <TableRow key={r.build}>
-                <TableCell className="font-medium">{r.build}</TableCell>
-                <TableCell className="text-muted-foreground">{r.env}</TableCell>
-                <TableCell className="text-muted-foreground">{r.time}</TableCell>
-                <TableCell>
-                  <StatusPill
-                    tone={
-                      r.status === "Success"
-                        ? "done"
-                        : r.status === "Building"
-                          ? "working"
-                          : "danger"
-                    }
-                  >
-                    {r.status}
-                  </StatusPill>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </Panel>
+  const devopsTask = floorState?.tasks.find((t) => t.role === "devops_engineer");
+  const configs = artifacts.filter((a) => a.createdBy === "devops_engineer");
+  const releaseGate = devopsTask?.requiresApproval
+    ? devopsTask.approvalGranted
+      ? { label: "Release approved", tone: "done" as const }
+      : floorState?.currentCheckpoint?.checkpointType === "release_approval"
+        ? { label: "Awaiting your approval", tone: "queued" as const }
+        : { label: "Not reached", tone: "idle" as const }
+    : null;
+
+  return (
+    <AppShell
+      title="Deployment Readiness"
+      subtitle={
+        project ? `Release pipeline for ${project.name}` : "Generated by the DevOps Engineer AI"
+      }
+      action={
+        <Button asChild variant="outline">
+          <Link to="/office">Open AI Office</Link>
+        </Button>
+      }
+    >
+      <p className="mb-4 text-xs text-muted-foreground">
+        HELIX generates deployment configuration and gates the release on your approval. It does not
+        deploy to your infrastructure; apply these files in your own CI/CD.
+      </p>
+      <div className="grid gap-5 lg:grid-cols-[360px_1fr]">
+        <Panel title="DevOps Engineer AI" description="Containerization & CI/CD task">
+          {!devopsTask ? (
+            <p className="text-sm text-muted-foreground">
+              No workflow has run for this project yet.
+            </p>
+          ) : (
+            <div className="space-y-3 text-sm">
+              <div className="flex flex-wrap items-center gap-2">
+                <StatusPill tone={taskTone(devopsTask.status)}>
+                  {taskStatusLabel[devopsTask.status]}
+                </StatusPill>
+                <ProviderBadge
+                  provider={devopsTask.provider}
+                  model={devopsTask.model}
+                  simulated={devopsTask.simulated}
+                />
+              </div>
+              <p className="text-muted-foreground">
+                {devopsTask.summary ?? "Runs after Security and QA reviews complete."}
+              </p>
+              {releaseGate && (
+                <div className="flex items-center justify-between rounded-lg border border-border p-3">
+                  <span className="text-xs font-medium">Release gate</span>
+                  <StatusPill tone={releaseGate.tone}>{releaseGate.label}</StatusPill>
+                </div>
+              )}
+            </div>
+          )}
+        </Panel>
+
+        <Panel
+          title="Deployment configuration"
+          description="Files generated for containerization and pipelines"
+        >
+          {configs.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No deployment files generated yet.</p>
+          ) : (
+            configs.map((a) => (
+              <details
+                key={a.path}
+                className="mb-2 rounded-lg border border-border p-3"
+                open={configs.length === 1}
+              >
+                <summary className="cursor-pointer text-sm font-medium">
+                  {a.path} <span className="text-xs text-muted-foreground">v{a.version}</span>
+                </summary>
+                <pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap font-mono text-xs">
+                  {a.content}
+                </pre>
+              </details>
+            ))
+          )}
+        </Panel>
+      </div>
     </AppShell>
   );
 }
