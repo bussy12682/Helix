@@ -211,3 +211,23 @@ test("clearWorkspace resets without tombstoning; reads never persist placeholder
   });
   assert.equal(cm.getArtifacts("p1").length, 1);
 });
+
+test("dashboard counts projects whose workflow completed", async () => {
+  const { app, ai } = makeApp();
+  const { token } = await signUp(app, "dash@helix.dev");
+  const project = await createProject(app, token, "Dash");
+  await call(app, "POST", `/api/v1/projects/${project.id}/workflows`, { token });
+  const wf = ai.orchestrator.listWorkflowsForProject(project.id)[0];
+  await ai.orchestrator.runNextSteps(wf.id);
+  while (wf.status === "awaiting_approval") {
+    await call(app, "POST", `/api/v1/workflows/${wf.id}/approve`, {
+      token,
+      body: { checkpointType: wf.currentCheckpoint.checkpointType, approved: true },
+    });
+    await ai.orchestrator.runNextSteps(wf.id);
+  }
+  assert.equal(wf.status, "completed");
+  const dash = await call(app, "GET", "/api/v1/dashboard", { token });
+  assert.equal(dash.json.stats.completedProjects, 1);
+  assert.equal(dash.json.stats.activeProjects, 0);
+});

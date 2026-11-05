@@ -912,7 +912,11 @@ async function handleGetDashboard({ request, store, requestId }) {
   }
 
   const projects = store.listProjectsForUser(auth.user.id);
-  const completedProjects = projects.filter((project) => project.status === "completed").length;
+  const completedProjects = projects.filter(
+    (project) =>
+      project.workflowStatus === "completed" ||
+      String(project.status).toLowerCase() === "completed",
+  ).length;
 
   return jsonResponse(
     200,
