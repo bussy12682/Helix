@@ -10,6 +10,7 @@ export class ContextManager {
   constructor({ onChange = null } = {}) {
     // In-memory workspace cache indexed by projectId
     this.projectWorkspaces = new Map();
+    this.removedProjects = new Set();
     this.onChange = onChange;
   }
 
@@ -18,7 +19,7 @@ export class ContextManager {
   }
 
   notifyChange(projectId) {
-    if (!this.onChange) return;
+    if (!this.onChange || this.removedProjects.has(projectId)) return;
     const ws = this.projectWorkspaces.get(projectId);
     if (ws) this.onChange(this.serializeWorkspace(ws));
   }
@@ -62,7 +63,7 @@ export class ContextManager {
    */
   getOrCreateWorkspace(projectId, initialData = {}) {
     if (!this.projectWorkspaces.has(projectId)) {
-      this.projectWorkspaces.set(projectId, {
+      const created = {
         projectId,
         name: initialData.name || "Untitled Project",
         description: initialData.description || "",
@@ -72,7 +73,11 @@ export class ContextManager {
         artifacts: new Map(), // key: artifact path, value: { name, type, path, content, version, createdBy }
         reviewFindings: [],
         taskHistory: [],
-      });
+      };
+      // Late writes from aborted tasks of a deleted project go to a detached workspace.
+      if (this.removedProjects.has(projectId)) return created;
+      this.projectWorkspaces.set(projectId, created);
+      this.notifyChange(projectId);
     }
     return this.projectWorkspaces.get(projectId);
   }
@@ -262,5 +267,6 @@ export class ContextManager {
    */
   clearWorkspace(projectId) {
     this.projectWorkspaces.delete(projectId);
+    this.removedProjects.add(projectId);
   }
 }

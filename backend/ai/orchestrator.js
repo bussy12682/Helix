@@ -98,6 +98,7 @@ export class Orchestrator {
   }
 
   persist(workflow) {
+    if (workflow.removed || this.workflows.get(workflow.id) !== workflow) return;
     workflow.updatedAt = new Date().toISOString();
     const completed = workflow.tasks.filter((t) => t.status === TASK_STATUS.COMPLETED).length;
     workflow.progress = Math.round((completed / workflow.tasks.length) * 100);
@@ -279,6 +280,8 @@ export class Orchestrator {
   removeProject(projectId) {
     for (const [id, wf] of this.workflows) {
       if (wf.projectId === projectId) {
+        wf.removed = true;
+        wf.status = WORKFLOW_STATUS.CANCELLED;
         this.abortControllers.get(id)?.abort();
         this.workflows.delete(id);
       }
@@ -323,12 +326,18 @@ export class Orchestrator {
         this.emit("workflow_status", workflow, { status: workflow.status });
       }
 
+      if (this.openPendingCheckpoint(workflow)) return workflow;
+
       const readyTasks = workflow.tasks.filter((task) => {
         if (task.status !== TASK_STATUS.QUEUED && task.status !== TASK_STATUS.NEEDS_REVISION)
           return false;
         return task.dependencies.every((depId) => {
           const depTask = workflow.tasks.find((t) => t.id === depId);
-          return depTask && depTask.status === TASK_STATUS.COMPLETED;
+          return (
+            depTask &&
+            depTask.status === TASK_STATUS.COMPLETED &&
+            (!depTask.requiresApproval || depTask.approvalGranted)
+          );
         });
       });
 
@@ -356,27 +365,32 @@ export class Orchestrator {
         return workflow;
       }
 
-      const checkpointTask = workflow.tasks.find(
-        (t) => t.status === TASK_STATUS.COMPLETED && t.requiresApproval && !t.approvalGranted,
-      );
-
-      if (checkpointTask) {
-        workflow.status = WORKFLOW_STATUS.AWAITING_APPROVAL;
-        workflow.currentCheckpoint = {
-          taskId: checkpointTask.id,
-          checkpointType: checkpointTask.requiresApproval,
-          agent: checkpointTask.agent,
-          title: checkpointTask.title,
-          summary: checkpointTask.output?.summary || "Review required before proceeding.",
-        };
-        this.persist(workflow);
-        this.emit("checkpoint_reached", workflow, { checkpoint: workflow.currentCheckpoint });
-        return workflow;
-      }
+      if (this.openPendingCheckpoint(workflow)) return workflow;
 
       await this.evaluateReviewLoops(workflow, options);
       this.persist(workflow);
     }
+  }
+
+  /**
+   * Pauses at the first completed-but-unapproved gate (also after retry/resume of a cancelled run).
+   */
+  openPendingCheckpoint(workflow) {
+    const checkpointTask = workflow.tasks.find(
+      (t) => t.status === TASK_STATUS.COMPLETED && t.requiresApproval && !t.approvalGranted,
+    );
+    if (!checkpointTask) return false;
+    workflow.status = WORKFLOW_STATUS.AWAITING_APPROVAL;
+    workflow.currentCheckpoint = {
+      taskId: checkpointTask.id,
+      checkpointType: checkpointTask.requiresApproval,
+      agent: checkpointTask.agent,
+      title: checkpointTask.title,
+      summary: checkpointTask.output?.summary || "Review required before proceeding.",
+    };
+    this.persist(workflow);
+    this.emit("checkpoint_reached", workflow, { checkpoint: workflow.currentCheckpoint });
+    return true;
   }
 
   failWorkflow(workflow, message) {
@@ -682,6 +696,13 @@ export class Orchestrator {
       throw new WorkflowStateError(
         `Only failed or cancelled workflows can be retried (status: ${workflow.status}).`,
       );
+    }
+    const previousRun = this.activeRuns.get(workflowId);
+    if (previousRun) {
+      // A cancelled run is still unwinding; requeue only after it settles so it cannot clobber the retry.
+      const run = previousRun.catch(() => {}).then(() => this.retryWorkflow(workflowId).run);
+      run.catch((error) => console.error("[Orchestrator] Retry run failed:", error));
+      return { workflow, run };
     }
     for (const task of workflow.tasks) {
       if ([TASK_STATUS.FAILED, TASK_STATUS.CANCELLED, TASK_STATUS.RUNNING].includes(task.status)) {

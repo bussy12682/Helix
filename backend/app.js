@@ -116,8 +116,11 @@ export function createApp(overrides = {}) {
     registerRateLimiter,
     passwordResetRateLimiter,
     async request(input, init = {}) {
-      const request = input instanceof Request ? input : new Request(input, init);
+      let request = input instanceof Request ? input : new Request(input, init);
       const requestId = randomUUID();
+      if (request.body && !request.headers.has("content-length")) {
+        request = limitRequestBody(request, config.maxBodyBytes);
+      }
       let response;
       try {
         const declaredLength = Number(request.headers.get("content-length") ?? 0);
@@ -339,6 +342,32 @@ function jsonResponse(status, payload, headers = {}) {
       "cache-control": "no-store",
       ...headers,
     },
+  });
+}
+
+/**
+ * Enforces maxBodyBytes on bodies without a Content-Length (chunked uploads) while streaming.
+ */
+function limitRequestBody(request, limit) {
+  let received = 0;
+  const limiter = new TransformStream({
+    transform(chunk, controller) {
+      received += chunk.byteLength;
+      if (received > limit) {
+        controller.error(
+          new HttpError(413, "PAYLOAD_TOO_LARGE", `Request body exceeds ${limit} bytes`),
+        );
+        return;
+      }
+      controller.enqueue(chunk);
+    },
+  });
+  return new Request(request.url, {
+    method: request.method,
+    headers: request.headers,
+    body: request.body.pipeThrough(limiter),
+    duplex: "half",
+    signal: request.signal,
   });
 }
 
@@ -1671,7 +1700,21 @@ async function handleWorkflowEventsStream({ request, store, ai, requestId, path 
         payload: ai.orchestrator.getOfficeFloorState(projectId),
       });
 
+      // Sessions are revalidated on every event so logout/password reset cuts off open streams.
+      const sessionActive = () => {
+        if (store.getSession(token)) return true;
+        sendData({ type: "session_revoked", timestamp: new Date().toISOString() });
+        cleanup?.();
+        try {
+          controller.close();
+        } catch {
+          // already closed
+        }
+        return false;
+      };
+
       const listener = (event) => {
+        if (!sessionActive()) return;
         const eventProjectId =
           event.payload?.projectId ??
           ai.orchestrator.getWorkflow(event.payload?.workflowId)?.projectId;
@@ -1679,7 +1722,9 @@ async function handleWorkflowEventsStream({ request, store, ai, requestId, path 
       };
       ai.observability.on("workflow_event", listener);
 
-      const heartbeatTimer = setInterval(() => write(": heartbeat\n\n"), 15000);
+      const heartbeatTimer = setInterval(() => {
+        if (sessionActive()) write(": heartbeat\n\n");
+      }, 15000);
       heartbeatTimer.unref?.();
 
       cleanup = () => {

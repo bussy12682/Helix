@@ -145,9 +145,11 @@ export class ModelRouter {
 
   getBaseUrl(provider) {
     if (provider === "google") {
-      return (
-        this.config.aiBaseUrl || "https://generativelanguage.googleapis.com/v1beta/openai"
-      ).replace(/\/$/, "");
+      const primaryUrl = this.defaultProvider === "google" ? this.config.aiBaseUrl : "";
+      return (primaryUrl || "https://generativelanguage.googleapis.com/v1beta/openai").replace(
+        /\/$/,
+        "",
+      );
     }
     if (provider === "openai") {
       return (this.config.openAiBaseUrl || "https://api.openai.com/v1").replace(/\/$/, "");
@@ -162,12 +164,14 @@ export class ModelRouter {
   }
 
   getApiKey(provider) {
+    // The generic aiApiKey belongs to the primary provider only; fallbacks use their own keys.
+    const primaryKey = (p) => (this.defaultProvider === p ? this.config.aiApiKey : "");
     if (provider === "google")
       return (
-        this.config.aiApiKey || this.config.googleAiApiKey || process.env.GOOGLE_AI_API_KEY || ""
+        primaryKey("google") || this.config.googleAiApiKey || process.env.GOOGLE_AI_API_KEY || ""
       );
     if (provider === "openai")
-      return this.config.openAiApiKey || this.config.aiApiKey || process.env.AI_API_KEY || "";
+      return this.config.openAiApiKey || primaryKey("openai") || process.env.AI_API_KEY || "";
     if (provider === "xai") return this.config.xaiApiKey || process.env.XAI_API_KEY || "";
     if (provider === "ollama") return "ollama-local-key";
     return "";
@@ -191,7 +195,7 @@ export class ModelRouter {
     if (candidates.length === 0) {
       // Nothing configured: try a local Ollama server, then (if allowed) clearly-labelled mock output.
       try {
-        const ollama = await this.tryOllama(agentRole, messages, temperature);
+        const ollama = await this.tryOllama(agentRole, messages, temperature, options);
         if (ollama?.content) return ollama;
       } catch {
         // Ollama not reachable.
@@ -369,7 +373,7 @@ export class ModelRouter {
     return result;
   }
 
-  async tryOllama(agentRole, messages, temperature) {
+  async tryOllama(agentRole, messages, temperature, options = {}) {
     const resolution = this.resolveModel(agentRole, { provider: "ollama" });
     const probe = await this.fetchImpl(`${this.ollamaBaseUrl}/api/tags`, {
       signal: AbortSignal.timeout(1500),
@@ -385,12 +389,16 @@ export class ModelRouter {
         response_format: { type: "json_object" },
         messages,
       }),
-      signal: AbortSignal.timeout(this.timeoutMs),
+      signal: options.signal
+        ? AbortSignal.any([options.signal, AbortSignal.timeout(this.timeoutMs)])
+        : AbortSignal.timeout(this.timeoutMs),
     });
     if (!response.ok) return null;
     const json = await response.json();
+    const content = json?.choices?.[0]?.message?.content ?? "";
+    if (content) options.onToken?.(content);
     return {
-      content: json?.choices?.[0]?.message?.content ?? "",
+      content,
       provider: "ollama",
       model: resolution.model,
       tier: resolution.tier,
