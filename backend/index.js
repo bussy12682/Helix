@@ -16,11 +16,22 @@ const app = createApp({ env: process.env });
 const server = http.createServer(createNodeHandler(app));
 server.requestTimeout = 0; // SSE connections are long-lived
 
-server.listen(config.appPort, () => {
-  console.log(`HELIX backend listening on http://localhost:${config.appPort}`);
-  const resumed = app.ai.orchestrator.resumeInterrupted?.() ?? [];
-  if (resumed.length) console.log(`Resumed ${resumed.length} interrupted workflow(s).`);
-});
+// Persistent stores (PostgreSQL) hydrate asynchronously: accept connections only
+// after migrations, the advisory lock, and state recovery complete.
+app.ready
+  .then(() => {
+    server.listen(config.appPort, () => {
+      const status = typeof app.getStatus === "function" ? app.getStatus() : null;
+      console.log(`HELIX backend listening on http://localhost:${config.appPort}`);
+      if (status) console.log(`Storage: ${status.mode}${status.migrations ? ` (migrations: ${status.migrations.join(", ")})` : ""}`);
+      const resumed = app.ai.orchestrator.resumeInterrupted?.() ?? [];
+      if (resumed.length) console.log(`Resumed ${resumed.length} interrupted workflow(s).`);
+    });
+  })
+  .catch((error) => {
+    console.error("Storage initialization failed; refusing to start:", error.message);
+    process.exit(1);
+  });
 
 function shutdown(signal) {
   console.log(`${signal} received, flushing state and shutting down.`);

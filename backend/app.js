@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { loadConfig } from "./config.js";
 import { createMemoryStore } from "./storage.js";
+import { createPostgresStore } from "./storage-postgres.js";
 import { initializeEmailService, sendVerificationEmail, sendPasswordResetEmail } from "./email.js";
 import { RateLimiter } from "./rate-limiter.js";
 import { validatePasswordComplexity } from "./password-validator.js";
@@ -111,9 +112,16 @@ export function createApp(overrides = {}) {
   ) {
     throw new Error("JWT_SECRET must be set to a strong random value in production.");
   }
-  const store = createMemoryStore({ storagePath: overrides.storagePath ?? config.storagePath });
+  const store =
+    overrides.store ??
+    (config.databaseUrl && /^postgres(ql)?:\/\//i.test(config.databaseUrl)
+      ? createPostgresStore({ connectionString: config.databaseUrl, poolSize: config.databasePoolSize ?? 10 })
+      : createMemoryStore({ storagePath: overrides.storagePath ?? config.storagePath }));
   const ai = overrides.ai ?? createAiSubsystem(config);
   bindAiToStore(ai, store);
+  // Persistent stores hydrate asynchronously; rebind once state is recovered so
+  // the AI subsystem (workspaces, traces) sees the hydrated data.
+  if (store.ready) store.ready.then(() => bindAiToStore(ai, store)).catch(() => {});
   const workspace =
     overrides.workspace ?? new WorkspaceService({ root: config.workspaceRoot, contextManager: ai.contextManager });
   const execution =
@@ -233,9 +241,16 @@ export function createApp(overrides = {}) {
     close() {
       applications.close();
       execution.close();
+      if (typeof store.close === "function") {
+        return store.close().catch((error) => console.error("[storage] close failed:", error.message));
+      }
       store.flush();
+      return Promise.resolve();
     },
   };
+
+  app.ready = store.ready ? store.ready.then(() => undefined) : Promise.resolve();
+  app.getStatus = () => (typeof store.getStatus === "function" ? store.getStatus() : { mode: store.mode });
 
   app.fetch = app.request.bind(app);
   return app;

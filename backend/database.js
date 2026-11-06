@@ -1,6 +1,9 @@
 /**
- * Database configuration descriptor. Runtime persistence is provided by the atomic JSON file store
- * in storage.js; DATABASE_URL is recorded for planning but no PostgreSQL adapter is implemented.
+ * Database configuration descriptor. Persistence is now REAL when DATABASE_URL
+ * points at PostgreSQL: storage-postgres.js applies migrations, holds a
+ * process-lifetime advisory lock, hydrates the cache, and flushes writes
+ * transactionally. This descriptor probes the configured database so callers
+ * get an honest, evidence-based status instead of an assumption.
  */
 export function createDatabaseFoundation(options = {}) {
   const config = {
@@ -10,10 +13,12 @@ export function createDatabaseFoundation(options = {}) {
 
   const state = {
     mode: config.databaseUrl ? "postgres" : "memory",
-    status: config.databaseUrl ? "postgres-not-implemented" : "safe-memory",
+    status: config.databaseUrl ? "postgres-unverified" : "safe-memory",
     initialized: false,
     connection: null,
-    schema: [],
+    schema: ["users", "sessions", "projects", "password_resets", "workflows", "workspaces", "traces", "taskflows", "helix_migrations"],
+    migrations: [],
+    error: null,
     requiresExternalDatabase: Boolean(config.databaseUrl),
     safeFallbackEnabled: !config.databaseUrl,
   };
@@ -40,38 +45,33 @@ export function createDatabaseFoundation(options = {}) {
       state.mode = "memory";
       state.status = "safe-memory";
       state.initialized = true;
-      state.schema = ["users", "projects", "sessions", "audit_events"];
-      state.requiresExternalDatabase = false;
-      state.safeFallbackEnabled = true;
-    } else {
-      // No PostgreSQL adapter exists yet: persistence uses the JSON file store (HELIX_STORAGE_PATH).
-      state.mode = "postgres";
-      state.status = "postgres-not-implemented";
-      state.initialized = true;
-      state.schema = ["users", "projects", "sessions", "audit_events"];
-      state.requiresExternalDatabase = true;
-      state.safeFallbackEnabled = false;
+      return { ...foundation, ...state };
     }
 
-    foundation.mode = state.mode;
-    foundation.status = state.status;
-    foundation.initialized = state.initialized;
-    foundation.schema = [...state.schema];
-    foundation.requiresExternalDatabase = state.requiresExternalDatabase;
-    foundation.safeFallbackEnabled = state.safeFallbackEnabled;
-
+    // Real probe: connect, read applied migrations, then disconnect.
+    try {
+      const pg = await import("pg");
+      const client = new pg.Client({ connectionString: config.databaseUrl });
+      await client.connect();
+      const { rows } = await client.query(
+        "SELECT version, name, applied_at FROM helix_migrations ORDER BY version",
+      );
+      await client.end();
+      state.connection = { database: config.databaseUrl.replace(/:[^:@/]+@/, ":***@") };
+      state.migrations = rows.map((row) => row.name);
+      state.status = "postgres-ready";
+    } catch (error) {
+      state.status = "postgres-unreachable";
+      state.error = error.message;
+    }
+    state.initialized = true;
     return { ...foundation, ...state };
   }
 
   async function close() {
     state.initialized = false;
-    state.connection = null;
-    foundation.initialized = false;
-    foundation.connection = null;
-    return true;
+    return { ...foundation, ...state };
   }
 
   return foundation;
 }
-
-export default createDatabaseFoundation;
