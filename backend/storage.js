@@ -10,6 +10,7 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
   const workflows = new Map();
   const workspaces = new Map();
   const traces = new Map();
+  const taskflows = new Map();
   let persistTimer = null;
 
   // Atomic write: serialize to a temp file then rename so a crash never leaves a truncated state file.
@@ -21,7 +22,7 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
     if (storagePath === ":memory:") return;
 
     const state = {
-      version: 2,
+      version: 3,
       users: [...users.values()],
       sessions: [...sessions.values()],
       projects: [...projects.values()],
@@ -29,6 +30,7 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
       workflows: [...workflows.values()],
       workspaces: [...workspaces.values()],
       traces: [...traces.entries()].map(([workflowId, spans]) => ({ workflowId, spans })),
+      taskflows: [...taskflows.values()],
     };
     mkdirSync(dirname(storagePath), { recursive: true });
     const tempPath = `${storagePath}.${process.pid}.tmp`;
@@ -65,6 +67,7 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
       for (const workspace of state.workspaces ?? [])
         workspaces.set(workspace.projectId, workspace);
       for (const entry of state.traces ?? []) traces.set(entry.workflowId, entry.spans ?? []);
+      for (const plan of state.taskflows ?? []) taskflows.set(plan.id, plan);
     } catch (error) {
       console.error(
         `[storage] Could not read ${storagePath}; starting with an empty store.`,
@@ -227,6 +230,7 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
         }
       }
       workspaces.delete(id);
+      for (const [planId, plan] of taskflows) if (plan.projectId === id) taskflows.delete(planId);
       persist();
     }
     return deleted;
@@ -261,6 +265,15 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
 
   function listTraces() {
     return [...traces.values()].flat();
+  }
+
+  function saveTaskflow(plan) {
+    taskflows.set(plan.id, structuredClone(plan));
+    persistSoon();
+  }
+
+  function listTaskflows() {
+    return [...taskflows.values()].map((plan) => structuredClone(plan));
   }
 
   function listProjectsForUser(userId) {
@@ -344,6 +357,8 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
     listWorkspaces,
     saveTrace,
     listTraces,
+    saveTaskflow,
+    listTaskflows,
     createUser,
     getUserByEmail,
     getUserById,

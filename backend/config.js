@@ -8,6 +8,7 @@ export function loadConfig(env = process.env) {
     appPort: Number.isFinite(appPortValue) && appPortValue > 0 ? appPortValue : 3001,
     jwtSecret: env.JWT_SECRET ?? "development-secret-change-me",
     storagePath: env.HELIX_STORAGE_PATH ?? ".data/helix-state.json",
+    workspaceRoot: env.HELIX_WORKSPACE_ROOT ?? ".data/workspaces",
     databaseUrl,
     databaseMode: databaseUrl ? "postgres" : "memory",
     baseUrl: env.BASE_URL ?? "http://localhost:8080",
@@ -42,9 +43,8 @@ export function loadConfig(env = process.env) {
         : (env.AI_PROVIDER ?? "google") === "xai"
           ? (env.XAI_API_KEY ?? "")
           : (env.AI_API_KEY ?? ""),
-    aiModel:
-      env.AI_MODEL ??
-      ((env.AI_PROVIDER ?? "google") === "xai" ? "grok-3-mini" : "gemini-3.6-flash"),
+    // Optional override for the primary provider only. Tier-specific defaults live in ModelRouter.
+    aiModel: env.AI_MODEL ?? "",
     aiBaseUrl: (
       env.AI_BASE_URL ??
       ((env.AI_PROVIDER ?? "google") === "xai"
@@ -56,6 +56,20 @@ export function loadConfig(env = process.env) {
     openAiApiKey: env.AI_API_KEY ?? "",
     openAiBaseUrl: (env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, ""),
     xaiApiKey: env.XAI_API_KEY ?? "",
+    xaiBaseUrl: (env.XAI_BASE_URL ?? "https://api.x.ai/v1").replace(/\/$/, ""),
+    googleReasoningModel: env.GOOGLE_REASONING_MODEL,
+    googleCodingModel: env.GOOGLE_CODING_MODEL,
+    googleFastModel: env.GOOGLE_FAST_MODEL,
+    openAiReasoningModel: env.OPENAI_REASONING_MODEL,
+    openAiCodingModel: env.OPENAI_CODING_MODEL,
+    openAiFastModel: env.OPENAI_FAST_MODEL,
+    xaiReasoningModel: env.XAI_REASONING_MODEL,
+    xaiCodingModel: env.XAI_CODING_MODEL,
+    xaiFastModel: env.XAI_FAST_MODEL,
+    ollamaBaseUrl: env.OLLAMA_BASE_URL,
+    ollamaReasoningModel: env.OLLAMA_REASONING_MODEL,
+    ollamaCodingModel: env.OLLAMA_CODING_MODEL,
+    ollamaFastModel: env.OLLAMA_FAST_MODEL,
     aiFallbackProviders: env.AI_FALLBACK_PROVIDERS ?? "",
     aiMaxRetries: Number(env.AI_MAX_RETRIES ?? 2),
     aiTimeoutMs: Number(env.AI_TIMEOUT_MS ?? 120000),
@@ -63,6 +77,9 @@ export function loadConfig(env = process.env) {
     allowMockFallback: env.HELIX_ALLOW_MOCK_FALLBACK
       ? env.HELIX_ALLOW_MOCK_FALLBACK === "true"
       : (env.NODE_ENV ?? "development") !== "production",
+    executionMaxConcurrent: Number(env.EXECUTION_MAX_CONCURRENT ?? 2),
+    githubToken: env.HELIX_GITHUB_TOKEN ?? "",
+    githubApiBaseUrl: (env.GITHUB_API_BASE_URL ?? "https://api.github.com").replace(/\/$/, ""),
 
     // OAuth configuration
     googleClientId:

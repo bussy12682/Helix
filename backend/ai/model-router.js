@@ -77,9 +77,9 @@ export class ModelRouter {
       (process.env.HELIX_ALLOW_MOCK_FALLBACK
         ? process.env.HELIX_ALLOW_MOCK_FALLBACK === "true"
         : process.env.NODE_ENV !== "production");
-    this.maxRetries = Number(config.aiMaxRetries ?? process.env.AI_MAX_RETRIES ?? 2);
-    this.timeoutMs = Number(config.aiTimeoutMs ?? process.env.AI_TIMEOUT_MS ?? 120000);
-    this.retryBaseDelayMs = Number(config.aiRetryBaseDelayMs ?? 500);
+    this.maxRetries = Math.max(0, Math.min(5, Number(config.aiMaxRetries ?? process.env.AI_MAX_RETRIES ?? 2) || 0));
+    this.timeoutMs = Math.max(1, Number(config.aiTimeoutMs ?? process.env.AI_TIMEOUT_MS ?? 120000) || 120000);
+    this.retryBaseDelayMs = Math.max(0, Number(config.aiRetryBaseDelayMs ?? 0) || 0);
     this.fetchImpl = config.fetchImpl ?? ((...args) => fetch(...args));
   }
 
@@ -110,7 +110,8 @@ export class ModelRouter {
     const tier = options.tier || ROLE_TO_TIER_MAP[agentRole] || MODEL_TIERS.FAST;
     const provider = options.provider || this.defaultProvider;
 
-    let modelName = this.config.aiModel || "gemini-2.5-flash";
+    let modelName =
+      options.model || (provider === this.defaultProvider ? this.config.aiModel : "") || "gemini-2.5-flash";
 
     if (provider === "google") {
       if (tier === MODEL_TIERS.REASONING)
@@ -124,8 +125,11 @@ export class ModelRouter {
         modelName = this.config.openAiCodingModel || "gpt-4o-mini";
       else modelName = this.config.openAiFastModel || "gpt-4o-mini";
     } else if (provider === "xai") {
-      if (tier === MODEL_TIERS.REASONING) modelName = "grok-3";
-      else modelName = "grok-3-mini";
+      if (tier === MODEL_TIERS.REASONING)
+        modelName = this.config.xaiReasoningModel || "grok-3";
+      else if (tier === MODEL_TIERS.CODING)
+        modelName = this.config.xaiCodingModel || "grok-3-mini";
+      else modelName = this.config.xaiFastModel || "grok-3-mini";
     } else if (provider === "ollama") {
       if (tier === MODEL_TIERS.REASONING)
         modelName = this.config.ollamaReasoningModel || "llama3.1:8b";
@@ -153,7 +157,7 @@ export class ModelRouter {
       return (this.config.openAiBaseUrl || "https://api.openai.com/v1").replace(/\/$/, "");
     }
     if (provider === "xai") {
-      return "https://api.x.ai/v1";
+      return (this.config.xaiBaseUrl || "https://api.x.ai/v1").replace(/\/$/, "");
     }
     if (provider === "ollama") {
       return `${this.ollamaBaseUrl}/v1`;
@@ -361,6 +365,24 @@ export class ModelRouter {
         }
       }
     }
+    buffer += decoder.decode();
+    const finalLine = buffer.trim();
+    if (finalLine.startsWith("data:")) {
+      const data = finalLine.slice(5).trim();
+      if (data && data !== "[DONE]") {
+        try {
+          const json = JSON.parse(data);
+          const delta = json?.choices?.[0]?.delta?.content;
+          if (delta) {
+            content += delta;
+            onToken(delta);
+          }
+          if (json.usage) usage = json.usage;
+        } catch {
+          // A truncated final event is not a valid completion delta.
+        }
+      }
+    }
     return { content, usage };
   }
 
@@ -414,6 +436,13 @@ export class ModelRouter {
 
     const projectName = parsedInput.name || parsedInput.projectName || "HELIX System";
 
+    // Repair tasks carry a real execution failure in their context. The deterministic
+    // offline draft must address that failure instead of returning the generic starter set.
+    const failureInput = parsedInput.context?.failure;
+    if (failureInput && typeof failureInput === "object") {
+      return this.generateMockRepairResponse(agentRole, parsedInput, failureInput);
+    }
+
     const mockBodies = {
       [AGENT_ROLES.PRODUCT_MANAGER]: {
         agent: AGENT_ROLES.PRODUCT_MANAGER,
@@ -425,7 +454,7 @@ export class ModelRouter {
             name: "prd.md",
             type: "spec",
             path: "docs/prd.md",
-            content: `# Product Requirements Document: ${projectName}\n\n## 1. Executive Summary\n${projectName} is a modern, high-performance platform.\n\n## 2. Target Personas\n- Developers\n- End Users\n\n## 3. User Stories\n- US-1: As a user, I want secure authentication so that my data is protected.\n- US-2: As a user, I want to manage projects so that my work is organized.\n- US-3: As an admin, I want to view system metrics.`,
+            content: `# Product Requirements Document: ${projectName}\n\n## 1. Executive Summary\n${projectName} is an explicitly simulated HELIX starter that demonstrates a real runnable workspace without external services.\n\n## 2. Target Personas\n- Developers evaluating the HELIX workspace\n- End users inspecting the generated starter\n\n## 3. User Stories\n- US-1: As a user, I can load the deterministic resource list from the running API.\n- US-2: As a developer, I can run the executable tests and production build locally.\n- US-3: As a developer, I can identify that generation was simulated and review the documented limitations.`,
           },
         ],
         decisions: [
@@ -446,7 +475,7 @@ export class ModelRouter {
             name: "architecture.md",
             type: "spec",
             path: "docs/architecture.md",
-            content: `# System Architecture: ${projectName}\n\n## Architecture Style\nModular Monolith with clean boundary separation.\n\n## Technology Stack\n- Frontend: React / TanStack Router\n- Backend: Node.js HTTP runtime\n- Database: PostgreSQL with memory fallback`,
+            content: `# System Architecture: ${projectName}\n\n## Architecture Style\nDependency-free modular monolith serving static browser assets and JSON from one Node.js process.\n\n## Technology Stack\n- Frontend: HTML, CSS, and browser JavaScript in public/\n- Backend: Node.js HTTP runtime with routes in src/api/\n- Data: Deterministic in-memory read-only fixture; no database connection\n\n## Runtime Contract\nThe server respects HOST and PORT. The build copies public/ into dist/, and production mode serves dist/ when it exists.`,
           },
           {
             name: "openapi-spec.json",
@@ -460,7 +489,6 @@ export class ModelRouter {
                   "/api/v1/health": { get: { responses: { 200: { description: "Healthy" } } } },
                   "/api/v1/resources": {
                     get: { responses: { 200: { description: "List resources" } } },
-                    post: { responses: { 201: { description: "Create resource" } } },
                   },
                 },
               },
@@ -477,12 +505,12 @@ export class ModelRouter {
           },
           {
             key: "persistence",
-            decision: "PostgreSQL Relational Schema",
-            rationale: "ACID compliance",
+            decision: "Deterministic in-memory fixture",
+            rationale: "Keeps the offline starter runnable without external services",
           },
         ],
         dependencies: ["TASK-001"],
-        risks: [{ description: "Database query bottlenecks on high volume", severity: "low" }],
+        risks: [{ description: "The fixture has no persistence or authentication and is not a production application", severity: "medium" }],
         next_actions: [AGENT_ROLES.DATABASE_ENGINEER, AGENT_ROLES.FRONTEND_ENGINEER],
       },
 
@@ -490,20 +518,20 @@ export class ModelRouter {
         agent: AGENT_ROLES.DATABASE_ENGINEER,
         status: "completed",
         task_id: "TASK-003",
-        summary: `Authored PostgreSQL relational schema and migration scripts with foreign keys and indexes.`,
+        summary: `Documented the deterministic read-only data fixture and its lack of persistence.`,
         artifacts: [
           {
-            name: "schema.sql",
-            type: "sql",
-            path: "database/schema.sql",
-            content: `CREATE TABLE IF NOT EXISTS users (\n  id VARCHAR(64) PRIMARY KEY,\n  email VARCHAR(255) UNIQUE NOT NULL,\n  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()\n);\n\nCREATE TABLE IF NOT EXISTS items (\n  id VARCHAR(64) PRIMARY KEY,\n  user_id VARCHAR(64) REFERENCES users(id) ON DELETE CASCADE,\n  title VARCHAR(255) NOT NULL,\n  status VARCHAR(32) DEFAULT 'active',\n  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()\n);\n\nCREATE INDEX IF NOT EXISTS idx_items_user_id ON items(user_id);`,
+            name: "README.md",
+            type: "doc",
+            path: "database/README.md",
+            content: `# Offline data fixture\n\nThe starter deliberately uses no database. src/api/service.js returns a deterministic in-memory resource list. No SQL migration runs and no user data is persisted. Add a real database, migrations, access controls, and integration tests before using generated output as a production data service.`,
           },
         ],
         decisions: [
           {
             key: "id_strategy",
-            decision: "UUID / Prefixed String",
-            rationale: "Safe client-side generation",
+            decision: "Stable fixture identifiers",
+            rationale: "Deterministic API responses make offline tests reproducible",
           },
         ],
         dependencies: ["TASK-002"],
@@ -518,10 +546,46 @@ export class ModelRouter {
         summary: `Implemented modular API routes, business logic, validation, and error middleware.`,
         artifacts: [
           {
+            name: "package.json",
+            type: "config",
+            path: "package.json",
+            content: JSON.stringify({
+              name: "helix-offline-starter",
+              version: "1.0.0",
+              private: true,
+              description: "Explicitly simulated HELIX starter application",
+              scripts: {
+                dev: "node server.js",
+                start: "node server.js",
+                build: "node scripts/build.js",
+                test: "node --test tests/*.test.js",
+              },
+              engines: { node: ">=22" },
+            }, null, 2),
+          },
+          {
+            name: "server.js",
+            type: "code",
+            path: "server.js",
+            content: `const http = require('node:http');\nconst fs = require('node:fs');\nconst path = require('node:path');\nconst { handleApi } = require('./src/api/routes');\n\nconst publicRoot = path.resolve(__dirname, process.env.NODE_ENV === 'production' && fs.existsSync(path.join(__dirname, 'dist')) ? 'dist' : 'public');\nconst types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };\nconst server = http.createServer((req, res) => {\n  if (handleApi(req, res)) return;\n  const pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);\n  const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\\/+/, '');\n  const file = path.resolve(publicRoot, relative);\n  if (file !== publicRoot && !file.startsWith(publicRoot + path.sep)) {\n    res.writeHead(400).end('Invalid path');\n    return;\n  }\n  fs.readFile(file, (error, content) => {\n    if (error) { res.writeHead(404).end('Not found'); return; }\n    res.writeHead(200, { 'content-type': types[path.extname(file)] || 'application/octet-stream' });\n    res.end(content);\n  });\n});\nconst port = Number(process.env.PORT || 3000);\nconst host = process.env.HOST || '127.0.0.1';\nserver.listen(port, host, () => console.log('Offline starter listening on http://' + host + ':' + port));`,
+          },
+          {
             name: "routes.js",
             type: "code",
             path: "src/api/routes.js",
-            content: `export function registerResourceRoutes(app) {\n  app.get('/api/v1/resources', async (req, res) => {\n    return res.json({ items: [] });\n  });\n}`,
+            content: `const { listResources } = require('./service');\n\nfunction json(res, status, payload) {\n  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });\n  res.end(JSON.stringify(payload));\n}\nfunction handleApi(req, res) {\n  const pathname = new URL(req.url, 'http://localhost').pathname;\n  if (pathname === '/api/v1/health') { json(res, 200, { ok: true }); return true; }\n  if (pathname === '/api/v1/resources') { json(res, 200, { items: listResources() }); return true; }\n  return pathname.startsWith('/api/') ? (json(res, 404, { error: 'Not found' }), true) : false;\n}\nmodule.exports = { handleApi };`,
+          },
+          {
+            name: "service.js",
+            type: "code",
+            path: "src/api/service.js",
+            content: `function listResources() {\n  return [{ id: 'welcome', name: 'HELIX offline starter', status: 'ready' }];\n}\nmodule.exports = { listResources };`,
+          },
+          {
+            name: "build.js",
+            type: "code",
+            path: "scripts/build.js",
+            content: `const fs = require('node:fs');\nconst path = require('node:path');\nconst output = path.resolve(__dirname, '..', 'dist');\nfs.rmSync(output, { recursive: true, force: true });\nfs.cpSync(path.resolve(__dirname, '..', 'public'), output, { recursive: true });\nconsole.log('Static application built into dist/');`,
           },
         ],
         decisions: [
@@ -540,20 +604,32 @@ export class ModelRouter {
         agent: AGENT_ROLES.FRONTEND_ENGINEER,
         status: "completed",
         task_id: "TASK-005",
-        summary: `Implemented React UI views, responsive navigation, and client query integration.`,
+        summary: `Implemented a dependency-free browser UI and live API client for the offline starter.`,
         artifacts: [
           {
-            name: "ResourceList.tsx",
+            name: "index.html",
             type: "code",
-            path: "src/components/ResourceList.tsx",
-            content: `import React from 'react';\n\nexport function ResourceList() {\n  return (\n    <div className="p-4 border rounded-lg">\n      <h2 className="text-xl font-bold">Project Workspace</h2>\n      <p className="text-sm text-gray-500">Live resources loaded dynamically.</p>\n    </div>\n  );\n}`,
+            path: "public/index.html",
+            content: `<!doctype html>\n<html lang="en">\n<head>\n  <meta charset="utf-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1">\n  <title>HELIX Offline Starter</title>\n  <link rel="stylesheet" href="/styles.css">\n</head>\n<body>\n  <main>\n    <p class="eyebrow">Explicitly simulated generation · real running app</p>\n    <h1>HELIX Offline Starter</h1>\n    <p>This deterministic mock project is executing in the isolated workspace.</p>\n    <button id="load">Load real API data</button>\n    <pre id="output">No request made yet.</pre>\n  </main>\n  <script src="/app.js"></script>\n</body>\n</html>`,
+          },
+          {
+            name: "app.js",
+            type: "code",
+            path: "public/app.js",
+            content: `const button = document.querySelector('#load');\nconst output = document.querySelector('#output');\nbutton.addEventListener('click', async () => {\n  button.disabled = true;\n  output.textContent = 'Loading…';\n  try {\n    const response = await fetch('/api/v1/resources');\n    if (!response.ok) throw new Error('HTTP ' + response.status);\n    output.textContent = JSON.stringify(await response.json(), null, 2);\n  } catch (error) {\n    output.textContent = error.message;\n  } finally {\n    button.disabled = false;\n  }\n});`,
+          },
+          {
+            name: "styles.css",
+            type: "code",
+            path: "public/styles.css",
+            content: `:root { font-family: system-ui, sans-serif; color: #e8e9f2; background: #0d0f18; }\nbody { margin: 0; display: grid; min-height: 100vh; place-items: center; }\nmain { width: min(680px, 90vw); padding: 3rem; border: 1px solid #343a52; border-radius: 20px; background: #161927; }\nh1 { margin-top: 0; }\n.eyebrow { color: #a89bff; font-size: .8rem; }\nbutton { padding: .75rem 1rem; border: 0; border-radius: 8px; background: #8b7cff; color: #10111a; font-weight: 700; cursor: pointer; }\npre { min-height: 5rem; padding: 1rem; white-space: pre-wrap; color: #b8bfd8; background: #0d0f18; border-radius: 8px; }`,
           },
         ],
         decisions: [
           {
             key: "ui_toolkit",
-            decision: "Tailwind CSS & Radix UI",
-            rationale: "Accessible and responsive",
+            decision: "Dependency-free HTML, CSS, and browser JavaScript",
+            rationale: "Runs offline without undeclared packages or manual scaffolding",
           },
         ],
         dependencies: ["TASK-002"],
@@ -565,25 +641,25 @@ export class ModelRouter {
         agent: AGENT_ROLES.SECURITY_ENGINEER,
         status: "completed",
         task_id: "TASK-006",
-        summary: `Conducted OWASP Top 10 threat modeling and dependency audit. Security score: 95/100.`,
+        summary: `Prepared a deterministic offline threat-model draft; no live dependency audit was executed.`,
         artifacts: [
           {
             name: "security-audit.md",
             type: "spec",
             path: "docs/security-audit.md",
-            content: `# Security Audit Report\n\n- Authentication: Token-based with rate-limiting verified.\n- SQL Injection: Parameterized queries enforced.\n- CORS & Headers: Strict policy recommended.\n- Score: 95/100`,
+            content: `# Offline Security Review Draft\n\nThis deterministic mock artifact is not a completed security audit.\n\n## Observed scope\n- The starter exposes public read-only health and resource endpoints; it implements no authentication.\n- The starter uses no database, SQL, secrets, or third-party runtime packages.\n- HELIX supplies the isolated preview boundary; the generated server itself is not a security sandbox.\n\n## Review checklist\n- Bind to loopback for local preview and explicitly choose exposure for containers.\n- Add authentication and authorization before storing or changing private data.\n- Add security headers, request limits, and rate limiting for an Internet-facing deployment.\n- Run dependency and static-analysis scans after adding real dependencies.`,
           },
         ],
         decisions: [
           {
-            key: "rate_limiting",
-            decision: "Sliding window limiter",
-            rationale: "Prevent brute-force abuse",
+            key: "network_exposure",
+            decision: "Loopback by default; explicit container exposure",
+            rationale: "The public fixture has no authentication and must not be exposed unintentionally",
           },
         ],
         dependencies: ["TASK-004"],
         risks: [
-          { description: "Enforce strict CORS headers in production deployment", severity: "low" },
+          { description: "Do not deploy the unauthenticated fixture as a private production service", severity: "medium" },
         ],
         next_actions: [AGENT_ROLES.DEVOPS_ENGINEER],
       },
@@ -592,13 +668,25 @@ export class ModelRouter {
         agent: AGENT_ROLES.QA_ENGINEER,
         status: "completed",
         task_id: "TASK-007",
-        summary: `Executed verification test plan against PRD user stories. 100% acceptance criteria passed.`,
+        summary: `Authored executable offline regression tests and a QA plan; the agent did not execute them.`,
         artifacts: [
+          {
+            name: "service.test.js",
+            type: "code",
+            path: "tests/service.test.js",
+            content: `const test = require('node:test');\nconst assert = require('node:assert/strict');\nconst { listResources } = require('../src/api/service');\n\ntest('resource service returns the deterministic welcome fixture', () => {\n  assert.deepEqual(listResources(), [{ id: 'welcome', name: 'HELIX offline starter', status: 'ready' }]);\n});`,
+          },
+          {
+            name: "routes.test.js",
+            type: "code",
+            path: "tests/routes.test.js",
+            content: `const test = require('node:test');\nconst assert = require('node:assert/strict');\nconst { handleApi } = require('../src/api/routes');\n\nfunction request(path) {\n  const response = { status: null, headers: null, body: null };\n  const res = {\n    writeHead(status, headers) { response.status = status; response.headers = headers; return this; },\n    end(body) { response.body = JSON.parse(body); },\n  };\n  const handled = handleApi({ url: path }, res);\n  return { handled, response };\n}\n\ntest('health route returns a healthy JSON response', () => {\n  const { handled, response } = request('/api/v1/health');\n  assert.equal(handled, true);\n  assert.equal(response.status, 200);\n  assert.deepEqual(response.body, { ok: true });\n});\n\ntest('resource route returns the service data', () => {\n  const { response } = request('/api/v1/resources');\n  assert.equal(response.status, 200);\n  assert.equal(response.body.items[0].id, 'welcome');\n});\n\ntest('unknown API routes return JSON 404 and browser routes pass through', () => {\n  assert.equal(request('/api/v1/missing').response.status, 404);\n  assert.equal(request('/').handled, false);\n});`,
+          },
           {
             name: "test-plan.md",
             type: "spec",
             path: "docs/test-plan.md",
-            content: `# QA Test Report\n\n- TC-01: Health check endpoint verification — PASSED\n- TC-02: Resource listing pagination — PASSED\n- TC-03: Input validation bounds — PASSED\n\nRelease Candidate Status: PASS`,
+            content: `# Offline QA Test Plan\n\nThe QA agent authored tests but did not execute them. Run npm test in the workspace to execute the real regression suite.\n\n- TC-01: Verify the health endpoint response.\n- TC-02: Verify the resource service and route return the deterministic fixture.\n- TC-03: Verify unknown API routes return JSON 404 and browser routes reach static handling.\n- TC-04: Run npm run build and inspect the generated dist/ files.\n\nRelease Candidate Status: UNVERIFIED until these commands pass outside the agent.`,
           },
         ],
         decisions: [],
@@ -611,19 +699,31 @@ export class ModelRouter {
         agent: AGENT_ROLES.DEVOPS_ENGINEER,
         status: "completed",
         task_id: "TASK-008",
-        summary: `Created production multi-stage Dockerfile and GitHub Actions CI/CD workflows.`,
+        summary: `Created Docker and CI definitions matching the generated Node entrypoint and scripts; no deployment was performed.`,
         artifacts: [
           {
             name: "Dockerfile",
             type: "config",
             path: "Dockerfile",
-            content: `FROM node:22-alpine AS builder\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci\nCOPY . .\nRUN npm run build\n\nFROM node:22-alpine\nWORKDIR /app\nCOPY --from=builder /app ./\nEXPOSE 3001\nCMD ["node", "backend/index.js"]`,
+            content: `FROM node:22-alpine AS builder\nWORKDIR /app\nCOPY package.json ./\nRUN npm install --ignore-scripts --no-audit --no-fund\nCOPY public ./public\nCOPY scripts ./scripts\nRUN npm run build\n\nFROM node:22-alpine\nENV NODE_ENV=production HOST=0.0.0.0 PORT=3000\nWORKDIR /app\nCOPY package.json server.js ./\nCOPY src ./src\nCOPY --from=builder /app/dist ./dist\nUSER node\nEXPOSE 3000\nCMD ["node", "server.js"]`,
+          },
+          {
+            name: "docker-compose.yml",
+            type: "config",
+            path: "docker-compose.yml",
+            content: `services:\n  app:\n    build: .\n    environment:\n      HOST: 0.0.0.0\n      PORT: 3000\n    ports:\n      - "3000:3000"\n    read_only: true\n    tmpfs:\n      - /tmp`,
+          },
+          {
+            name: ".env.example",
+            type: "config",
+            path: ".env.example",
+            content: `HOST=127.0.0.1\nPORT=3000\nNODE_ENV=development`,
           },
           {
             name: "ci.yml",
             type: "config",
             path: ".github/workflows/ci.yml",
-            content: `name: CI\non: [push, pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n      - run: npm ci\n      - run: npm test`,
+            content: `name: CI\non: [push, pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 22\n      - run: npm install --no-audit --no-fund\n      - run: npm test\n      - run: npm run build`,
           },
         ],
         decisions: [
@@ -642,13 +742,13 @@ export class ModelRouter {
         agent: AGENT_ROLES.DOCUMENTATION_ENGINEER,
         status: "completed",
         task_id: "TASK-009",
-        summary: `Compiled production-ready README.md, API documentation, and architecture runbooks.`,
+        summary: `Documented offline setup, real verification commands, architecture, and starter limitations.`,
         artifacts: [
           {
             name: "README.md",
             type: "doc",
             path: "README.md",
-            content: `# ${projectName}\n\nEngineered by the HELIX AI Engineering Operating System.\n\n## Quick Start\n\`\`\`sh\nnpm install\nnpm run dev\n\`\`\`\n\n## Architecture\nRefer to \`docs/architecture.md\` and \`docs/api-spec.json\`.`,
+            content: `# ${projectName}\n\nThis is an explicitly simulated HELIX starter, not live-provider generated code. Its Node.js server and browser application can nevertheless be installed, tested, built, and previewed for real.\n\n## Quick Start\nRequires Node.js 22 or newer. No external services or runtime dependencies are required.\n\n\`\`\`sh\nnpm install\nnpm test\nnpm run build\nnpm start\n\`\`\`\n\nOpen http://127.0.0.1:3000. HOST and PORT override the listener. Use npm run dev for the same development server with NODE_ENV=development supplied by HELIX.\n\n## Verification Status\nThe generating agents did not execute commands. A successful npm test, build, or preview is reported separately by HELIX execution jobs.\n\n## Architecture and Limitations\nRefer to docs/architecture.md, docs/api-spec.json, and docs/test-plan.md. This read-only fixture has no authentication, persistence, production hardening, or deployment credentials.`,
           },
         ],
         decisions: [],
@@ -667,6 +767,81 @@ export class ModelRouter {
       decisions: [],
       dependencies: [],
       risks: [],
+      next_actions: [],
+    };
+
+    return {
+      content: JSON.stringify(payload),
+      provider: "mock",
+      model: "helix-deterministic-mock",
+      tier: ROLE_TO_TIER_MAP[agentRole] || MODEL_TIERS.FAST,
+      durationMs: 15,
+      usage: { prompt_tokens: 150, completion_tokens: 300, total_tokens: 450 },
+    };
+  }
+
+  /**
+   * Deterministic offline repair draft. Proposes a genuinely minimal, reviewable
+   * change for the observed failure when one can be derived statically; otherwise
+   * it proposes a failure analysis instead of guessing. The result is always
+   * labelled simulated and never claims to have been executed or verified.
+   */
+  generateMockRepairResponse(agentRole, parsedInput, failure) {
+    const selectedFile = parsedInput.context?.selectedFile ?? null;
+    const stderrTail = String(failure.stderr ?? failure.stdout ?? "")
+      .trim()
+      .split("\n")
+      .slice(-4)
+      .join("\n")
+      .slice(0, 800);
+    const artifacts = [];
+    let summary = `Reviewed the failed command \`${failure.command}\` (exit ${failure.exitCode ?? "n/a"}) and drafted an unverified repair analysis.`;
+
+    // A top-level `throw new Error(<simple literal>)` can be converted into a
+    // handled failure report line by line, keeping every other line identical.
+    if (selectedFile && /\.(js|mjs|cjs)$/i.test(selectedFile.path)) {
+      const throwLine = /^(\s*)throw\s+new\s+Error\s*\(\s*(["'`][^"'`]*["'`])\s*\)\s*;?\s*$/;
+      const lines = selectedFile.content.split("\n");
+      const matchIndex = lines.findIndex((line) => throwLine.test(line));
+      if (matchIndex >= 0) {
+        const match = lines[matchIndex].match(throwLine);
+        lines[matchIndex] = `${match[1]}// Offline repair draft: replaced an unconditional throw with a handled failure report.\n${match[1]}console.error("Handled previously thrown failure:", ${match[2]});`;
+        artifacts.push({
+          name: selectedFile.path.split("/").pop(),
+          type: "file",
+          path: selectedFile.path,
+          content: lines.join("\n"),
+        });
+        summary = `Drafted a minimal replacement for ${selectedFile.path} that handles the previously thrown failure instead of crashing. The draft has not been executed.`;
+      }
+    }
+
+    if (!artifacts.length) {
+      artifacts.push({
+        name: "repair-analysis.md",
+        type: "doc",
+        path: "docs/repair-analysis.md",
+        content: `# Offline Repair Analysis\n\nDeterministic draft for the failed command \`${failure.command}\` (exit ${failure.exitCode ?? "n/a"}${failure.timedOut ? ", timed out" : ""}).\n\n## Captured failure output\n\n\`\`\`\n${stderrTail || "No stderr captured."}\n\`\`\`\n\n## Next steps\n\n- Read the error location above and inspect the referenced workspace file.\n- A deterministic offline draft cannot safely rewrite this failure class; no file change is proposed.\n- After fixing the file, rerun the same command and let the execution job report the real result.\n`,
+      });
+    }
+
+    const payload = {
+      agent: agentRole,
+      status: "completed",
+      task_id: "TASK-REPAIR",
+      summary,
+      artifacts,
+      decisions: [
+        {
+          key: "repair_strategy",
+          decision: artifacts[0].path.endsWith(".md") ? "analysis-only" : "minimal-file-replacement",
+          rationale: "Deterministic offline draft derived from the captured failure output",
+        },
+      ],
+      dependencies: [],
+      risks: [
+        { description: "Simulated offline draft: the proposal was not executed or verified by HELIX.", severity: "medium" },
+      ],
       next_actions: [],
     };
 

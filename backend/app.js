@@ -11,6 +11,14 @@ import { PDFParse } from "pdf-parse";
 import { createAiSubsystem } from "./ai/index.js";
 import { hashPassword, verifyPassword } from "./passwords.js";
 import { WorkflowStateError } from "./ai/orchestrator.js";
+import { WorkspaceService } from "./workspace-service.js";
+import { ExecutionService } from "./execution-service.js";
+import { TaskflowEngine, TaskflowValidationError } from "./taskflow.js";
+import { GitHubService, GitHubExportError } from "./github-service.js";
+import { AGENT_ROLES } from "./ai/contracts.js";
+import { AiProviderError } from "./ai/model-router.js";
+import { ApplicationService } from "./application-service.js";
+import { normalizeWorkspacePath } from "./workspace-paths.js";
 
 const DEFAULT_SECRET = "development-secret-change-me";
 
@@ -75,13 +83,17 @@ function applyStandardHeaders(response, { config, request, requestId }) {
   const allowed = resolveCorsOrigin(config, request.headers.get("origin"));
   if (allowed) {
     headers.set("Access-Control-Allow-Origin", allowed);
-    headers.set("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+    headers.set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
     headers.set("Access-Control-Allow-Headers", "Content-Type,Authorization");
     headers.set("Access-Control-Expose-Headers", "x-request-id,x-correlation-id");
     if (allowed !== "*") headers.append("Vary", "Origin");
   }
   headers.set("x-content-type-options", "nosniff");
-  headers.set("x-frame-options", "DENY");
+  if (/(?:^|;)\s*frame-ancestors\s/i.test(headers.get("content-security-policy") ?? "")) {
+    headers.delete("x-frame-options");
+  } else if (headers.get("x-frame-options") !== "SAMEORIGIN") {
+    headers.set("x-frame-options", "DENY");
+  }
   headers.set("referrer-policy", "no-referrer");
   headers.set("x-request-id", requestId);
   headers.set("x-correlation-id", requestId);
@@ -101,6 +113,25 @@ export function createApp(overrides = {}) {
   const store = createMemoryStore({ storagePath: overrides.storagePath ?? config.storagePath });
   const ai = overrides.ai ?? createAiSubsystem(config);
   bindAiToStore(ai, store);
+  const workspace =
+    overrides.workspace ?? new WorkspaceService({ root: config.workspaceRoot, contextManager: ai.contextManager });
+  const execution =
+    overrides.execution ??
+    new ExecutionService({ workspaceService: workspace, maxConcurrent: config.executionMaxConcurrent });
+  const applications =
+    overrides.applications ??
+    new ApplicationService({
+      workspaceService: workspace,
+      executionService: execution,
+      frameAncestors: config.corsOrigins.includes("*") ? "*" : config.corsOrigins.join(" ") || "'self'",
+    });
+  const taskflow = overrides.taskflow ?? new TaskflowEngine({ executionService: execution });
+  taskflow.hydrate(store.listTaskflows());
+  const persistTaskflow = (plan) => store.saveTaskflow(plan);
+  const github =
+    overrides.github ??
+    new GitHubService({ token: config.githubToken, apiBaseUrl: config.githubApiBaseUrl });
+  ai.toolRegistry.setTestRunner((args) => execution.runTests(args.projectId, args));
   const loginRateLimiter = new RateLimiter();
   const registerRateLimiter = new RateLimiter();
   const passwordResetRateLimiter = new RateLimiter();
@@ -112,6 +143,11 @@ export function createApp(overrides = {}) {
     config,
     store,
     ai,
+    workspace,
+    execution,
+    applications,
+    taskflow,
+    github,
     loginRateLimiter,
     registerRateLimiter,
     passwordResetRateLimiter,
@@ -133,6 +169,12 @@ export function createApp(overrides = {}) {
           config,
           store,
           ai,
+          workspace,
+          execution,
+          applications,
+          taskflow,
+          persistTaskflow,
+          github,
           loginRateLimiter,
           registerRateLimiter,
           passwordResetRateLimiter,
@@ -153,6 +195,8 @@ export function createApp(overrides = {}) {
       return applyStandardHeaders(response, { config, request, requestId });
     },
     close() {
+      applications.close();
+      execution.close();
       store.flush();
     },
   };
@@ -166,6 +210,12 @@ async function handleRequest({
   config,
   store,
   ai,
+  workspace,
+  execution,
+  applications,
+  taskflow,
+  persistTaskflow,
+  github,
   loginRateLimiter,
   registerRateLimiter,
   passwordResetRateLimiter,
@@ -294,6 +344,70 @@ async function handleRequest({
     return handleGetProjectArtifacts({ request, store, ai, requestId, path });
   }
 
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/files$/.test(path)) {
+    return handleWorkspaceFiles({ request, store, workspace, execution, requestId, path });
+  }
+  if (request.method === "PUT" && /^\/api\/v1\/projects\/[^/]+\/files$/.test(path)) {
+    return handleWorkspaceWrite({ request, store, workspace, requestId, path });
+  }
+  if (request.method === "DELETE" && /^\/api\/v1\/projects\/[^/]+\/files$/.test(path)) {
+    return handleWorkspaceDelete({ request, store, workspace, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/execute$/.test(path)) {
+    return handleWorkspaceExecute({ request, store, execution, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/tests$/.test(path)) {
+    return handleWorkspaceTests({ request, store, execution, requestId, path });
+  }
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/executions$/.test(path)) {
+    return handleExecutionList({ request, store, execution, applications, requestId, path });
+  }
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/executions\/stream$/.test(path)) {
+    return handleExecutionStream({ request, store, execution, applications, requestId, path });
+  }
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/executions\/[^/]+$/.test(path)) {
+    return handleExecutionGet({ request, store, execution, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/executions\/[^/]+\/stop$/.test(path)) {
+    return handleExecutionStop({ request, store, execution, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/install$/.test(path)) {
+    return handleApplicationInstall({ request, store, applications, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/build$/.test(path)) {
+    return handleApplicationBuild({ request, store, applications, requestId, path });
+  }
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/preview\/status$/.test(path)) {
+    return handlePreviewStatus({ request, store, applications, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/preview\/start$/.test(path)) {
+    return handlePreviewStart({ request, store, applications, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/preview\/stop$/.test(path)) {
+    return handlePreviewStop({ request, store, applications, requestId, path });
+  }
+  if (/^\/api\/v1\/projects\/[^/]+\/preview(?:\/|$)/.test(path)) {
+    return handlePreviewProxy({ request, store, applications, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/repair$/.test(path)) {
+    return handleWorkspaceRepair({ request, store, workspace, execution, ai, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/debug$/.test(path)) {
+    return handleWorkspaceDebug({ request, store, workspace, execution, ai, requestId, path });
+  }
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/taskflows$/.test(path)) {
+    return handleTaskflowList({ request, store, taskflow, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/taskflows$/.test(path)) {
+    return handleTaskflowCreate({ request, store, taskflow, persistTaskflow, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/taskflows\/[^/]+\/run$/.test(path)) {
+    return handleTaskflowRun({ request, store, taskflow, persistTaskflow, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/github\/export$/.test(path)) {
+    return handleGitHubExport({ request, store, workspace, github, requestId, path });
+  }
+
   if (request.method === "POST" && /^\/api\/v1\/workflows\/[^/]+\/approve$/.test(path)) {
     return handleApproveWorkflowCheckpoint({ request, store, ai, requestId, path });
   }
@@ -315,7 +429,7 @@ async function handleRequest({
   }
 
   if (request.method === "DELETE" && /^\/api\/v1\/projects\//.test(path)) {
-    return handleDeleteProject({ request, store, ai, requestId, path });
+    return handleDeleteProject({ request, store, ai, workspace, taskflow, requestId, path });
   }
 
   if (request.method === "GET" && /^\/api\/v1\/projects\//.test(path)) {
@@ -1154,7 +1268,7 @@ async function handleExtractProjectDocument({ request, store, requestId }) {
   }
 }
 
-async function handleDeleteProject({ request, store, ai, requestId, path }) {
+async function handleDeleteProject({ request, store, ai, workspace, taskflow, requestId, path }) {
   const auth = requireAuth(request, store);
   if ("error" in auth) {
     return auth.error;
@@ -1184,6 +1298,8 @@ async function handleDeleteProject({ request, store, ai, requestId, path }) {
   }
 
   ai.orchestrator.removeProject?.(projectId);
+  taskflow.removeProject(projectId);
+  await workspace.remove(projectId);
   store.deleteProject(projectId);
   return jsonResponse(
     200,
@@ -1592,6 +1708,395 @@ async function handleGetProjectArtifacts({ request, store, ai, requestId, path }
   if ("error" in access) return access.error;
   const artifacts = ai.contextManager.getArtifacts(projectId);
   return jsonResponse(200, { artifacts }, { "x-correlation-id": requestId });
+}
+
+function workspaceErrorResponse(error, requestId) {
+  if (error instanceof GitHubExportError) {
+    const status = error.code === "GITHUB_NOT_CONFIGURED" || error.code === "GITHUB_UNAVAILABLE" ? 503 : error.code === "GITHUB_EXPORT_FAILED" ? 502 : 400;
+    return jsonResponse(status, { error: { code: error.code, message: error.message, requestId } });
+  }
+  if (error instanceof TaskflowValidationError) {
+    return jsonResponse(400, { error: { code: error.code, message: error.message, requestId } });
+  }
+  return jsonResponse(400, { error: { code: "WORKSPACE_REQUEST_FAILED", message: error.message, requestId } });
+}
+
+function workspaceProjectId(path) {
+  return path.split("/")[4];
+}
+
+async function handleWorkspaceFiles({ request, store, workspace, execution, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const filePath = new URL(request.url).searchParams.get("path");
+    if (filePath) {
+      const file = workspace.read(projectId, filePath);
+      if (!file) return jsonResponse(404, { error: { code: "FILE_NOT_FOUND", message: "Workspace file not found", requestId } });
+      return jsonResponse(200, { file }, { "x-correlation-id": requestId });
+    }
+    return jsonResponse(200, { files: workspace.list(projectId), execution: await execution.getStatus() }, { "x-correlation-id": requestId });
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleWorkspaceWrite({ request, store, workspace, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const body = await parseJsonBody(request);
+    if (body.expectedVersion !== undefined) {
+      const existing = workspace.read(projectId, String(body.path ?? ""));
+      if (!existing || existing.version !== Number(body.expectedVersion)) {
+        return jsonResponse(409, { error: { code: "FILE_VERSION_CONFLICT", message: "The file changed after it was loaded. Reload before saving.", requestId } });
+      }
+    }
+    const file = await workspace.write(projectId, String(body.path ?? ""), body.content, { createdBy: access.user.id });
+    return jsonResponse(200, { file }, { "x-correlation-id": requestId });
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleWorkspaceDelete({ request, store, workspace, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const filePath = new URL(request.url).searchParams.get("path") ?? "";
+    const deleted = await workspace.delete(projectId, filePath);
+    if (!deleted) return jsonResponse(404, { error: { code: "FILE_NOT_FOUND", message: "Workspace file not found", requestId } });
+    return jsonResponse(200, { deleted: true }, { "x-correlation-id": requestId });
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleWorkspaceExecute({ request, store, execution, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const body = await parseJsonBody(request);
+    if (body.wait === true) {
+      const result = await execution.execute(projectId, { command: body.command, timeoutMs: body.timeoutMs });
+      return jsonResponse(200, result, { "x-correlation-id": requestId });
+    }
+    const job = execution.start(projectId, { command: body.command, timeoutMs: body.timeoutMs });
+    return jsonResponse(202, { job: execution.toPublicJob(job) }, { "x-correlation-id": requestId });
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleWorkspaceTests({ request, store, execution, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const body = await parseJsonBody(request);
+    const job = execution.start(projectId, {
+      command: body.command ?? "npm test",
+      timeoutMs: body.timeoutMs ?? 60000,
+      testSuiteName: String(body.testSuiteName ?? "Project tests").slice(0, 200),
+      kind: "test",
+    });
+    return jsonResponse(202, { job: execution.toPublicJob(job) }, { "x-correlation-id": requestId });
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleExecutionList({ request, store, execution, applications, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  return jsonResponse(200, {
+    jobs: execution.listJobs(projectId),
+    preview: applications.getPreview(projectId),
+    execution: await execution.getStatus(),
+  }, { "x-correlation-id": requestId });
+}
+
+async function handleExecutionGet({ request, store, execution, requestId, path }) {
+  const parts = path.split("/");
+  const projectId = parts[4];
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  const job = execution.getJob(projectId, parts[6]);
+  if (!job) return jsonResponse(404, { error: { code: "EXECUTION_NOT_FOUND", message: "Execution job not found", requestId } });
+  return jsonResponse(200, { job: execution.toPublicJob(job) }, { "x-correlation-id": requestId });
+}
+
+async function handleExecutionStop({ request, store, execution, requestId, path }) {
+  const parts = path.split("/");
+  const projectId = parts[4];
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  const job = execution.stop(projectId, parts[6]);
+  if (!job) return jsonResponse(404, { error: { code: "EXECUTION_NOT_FOUND", message: "Execution job not found", requestId } });
+  return jsonResponse(200, { job: execution.toPublicJob(job) }, { "x-correlation-id": requestId });
+}
+
+async function handleApplicationInstall({ request, store, applications, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const job = await applications.install(projectId);
+    return jsonResponse(202, { job: applications.executionService.toPublicJob(job), network: "enabled-for-package-installation" }, { "x-correlation-id": requestId });
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleApplicationBuild({ request, store, applications, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const body = await parseJsonBody(request);
+    const job = await applications.build(projectId, { command: body.command });
+    return jsonResponse(202, { job: applications.executionService.toPublicJob(job) }, { "x-correlation-id": requestId });
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handlePreviewStatus({ request, store, applications, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  return jsonResponse(200, { preview: applications.getPreview(projectId) }, { "x-correlation-id": requestId });
+}
+
+async function handlePreviewStart({ request, store, applications, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const body = await parseJsonBody(request);
+    const preview = await applications.startPreview(projectId, { command: body.command, directory: body.directory });
+    return jsonResponse(preview.status === "ready" ? 200 : 503, { preview: applications.toPublicPreview(preview) }, { "x-correlation-id": requestId });
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handlePreviewStop({ request, store, applications, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  const preview = applications.stopPreview(projectId);
+  if (!preview) return jsonResponse(404, { error: { code: "PREVIEW_NOT_FOUND", message: "No preview exists for this project", requestId } });
+  return jsonResponse(200, { preview: applications.toPublicPreview(preview) }, { "x-correlation-id": requestId });
+}
+
+async function handlePreviewProxy({ request, store, applications, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const queryToken = new URL(request.url).searchParams.get("token");
+  const previewPrefix = `/api/v1/projects/${projectId}/preview/`;
+  const pathToken = path.startsWith(previewPrefix)
+    ? path.slice(previewPrefix.length).split("/")[0] || null
+    : null;
+  const pathPreview = pathToken ? applications.authorize(projectId, pathToken) : null;
+  let preview = queryToken ? applications.authorize(projectId, queryToken) : pathPreview;
+  if ((queryToken || pathToken) && !preview && !bearerToken(request)) {
+    return jsonResponse(404, { error: { code: "PREVIEW_NOT_READY", message: "Preview is not running or the preview token is invalid", requestId } });
+  }
+  if (!preview) {
+    const access = requireProjectAccess(request, store, projectId, requestId);
+    if ("error" in access) return access.error;
+    const current = applications.getPreview(projectId);
+    if (current?.status === "ready") preview = applications.previews.get(projectId);
+  }
+  if (!preview) return jsonResponse(404, { error: { code: "PREVIEW_NOT_READY", message: "Preview is not running or the preview token is invalid", requestId } });
+  return applications.proxy(preview, request);
+}
+
+async function handleExecutionStream({ request, store, execution, applications, requestId, path }) {
+  const url = new URL(request.url);
+  const token = url.searchParams.get("token") || bearerToken(request);
+  if (!token) return jsonResponse(401, { error: { code: "UNAUTHORIZED", message: "Missing token", requestId } });
+  const projectId = workspaceProjectId(path);
+  const authed = new Request(request.url, { headers: { authorization: `Bearer ${token}` } });
+  const access = requireProjectAccess(authed, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  let cleanup = null;
+  const stream = new ReadableStream({
+    start(controller) {
+      const encoder = new TextEncoder();
+      let closed = false;
+      const write = (text) => {
+        if (closed) return;
+        try { controller.enqueue(encoder.encode(text)); } catch { cleanup?.(); }
+      };
+      const send = (event) => write(`id: ${event.id ?? randomUUID()}\ndata: ${JSON.stringify(event)}\n\n`);
+      write("retry: 2000\n\n");
+      send({ type: "execution_snapshot", timestamp: new Date().toISOString(), projectId, payload: { jobs: execution.listJobs(projectId), preview: applications.getPreview(projectId) } });
+      const onExecution = (event) => { if (event.projectId === projectId) send(event); };
+      const onPreview = (event) => { if (event.projectId === projectId) send(event); };
+      execution.on("event", onExecution);
+      applications.on("event", onPreview);
+      const heartbeat = setInterval(() => write(": heartbeat\n\n"), 15000);
+      heartbeat.unref?.();
+      cleanup = () => {
+        if (closed) return;
+        closed = true;
+        clearInterval(heartbeat);
+        execution.off("event", onExecution);
+        applications.off("event", onPreview);
+      };
+      request.signal.addEventListener("abort", cleanup, { once: true });
+    },
+    cancel() { cleanup?.(); },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+    },
+  });
+}
+
+async function handleWorkspaceRepair({ request, store, workspace, execution, ai, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const body = await parseJsonBody(request);
+    const job = execution.getJob(projectId, String(body.jobId ?? ""));
+    if (!job?.result) return jsonResponse(404, { error: { code: "EXECUTION_NOT_FOUND", message: "A completed execution job is required for repair", requestId } });
+    const filePath = body.filePath ? normalizeWorkspacePath(String(body.filePath)) : null;
+    const file = filePath ? workspace.read(projectId, filePath) : null;
+    const role = filePath && /\.(tsx|jsx|css|html)$/i.test(filePath) ? AGENT_ROLES.FRONTEND_ENGINEER : AGENT_ROLES.BACKEND_ENGINEER;
+    let meta = null;
+    const output = await ai.workforce.getAgent(role).execute({
+      workflowId: `repair_${job.id}`,
+      projectId,
+      taskId: `repair_${randomUUID()}`,
+      taskTitle: "Diagnose a real execution failure and propose a minimal repair",
+      context: {
+        project: { id: projectId, name: access.project.name, description: access.project.description },
+        failure: {
+          command: job.command,
+          exitCode: job.result.exitCode,
+          stdout: String(job.result.stdout ?? "").slice(-12000),
+          stderr: String(job.result.stderr ?? "").slice(-12000),
+          timedOut: job.result.timedOut ?? false,
+        },
+        selectedFile: file ? { path: file.path, content: file.content } : null,
+        workspaceFiles: workspace.list(projectId).map((artifact) => artifact.path),
+        instruction: "Return complete replacement files only for changes needed to fix the observed failure. Do not claim the repair has been tested.",
+      },
+      onMeta: (value) => { meta = value; },
+    });
+    const files = output.artifacts.map((artifact) => ({ ...artifact, path: normalizeWorkspacePath(artifact.path) }));
+    return jsonResponse(200, {
+      summary: output.summary,
+      files,
+      decisions: output.decisions,
+      basedOnJobId: job.id,
+      provider: meta?.provider,
+      model: meta?.model,
+      simulated: meta?.provider === "mock",
+      verified: false,
+    }, { "x-correlation-id": requestId });
+  } catch (error) {
+    if (error instanceof AiProviderError) {
+      return jsonResponse(error.code === "AI_NOT_CONFIGURED" ? 503 : 502, { error: { code: error.code, message: error.message, requestId } });
+    }
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleWorkspaceDebug({ request, store, workspace, execution, ai, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const body = await parseJsonBody(request);
+    const findings = [];
+    for (const file of workspace.list(projectId)) {
+      const artifact = workspace.read(projectId, file.path);
+      if (file.path.endsWith(".json")) {
+        try { JSON.parse(artifact.content); } catch (error) { findings.push({ rule: "INVALID_JSON", severity: "High", file: file.path, message: error.message }); }
+      }
+      const report = await ai.toolRegistry.executeTool(AGENT_ROLES.SECURITY_ENGINEER, "security_analyzer", { code: artifact.content, filePath: file.path });
+      findings.push(...report.findings);
+    }
+    let runtime = null;
+    if (body.command) runtime = await execution.execute(projectId, { command: body.command, timeoutMs: body.timeoutMs });
+    const output = `${runtime?.stdout ?? ""}\n${runtime?.stderr ?? ""}`;
+    const recommendations = [];
+    if (/Cannot find module|ERR_MODULE_NOT_FOUND/.test(output)) recommendations.push("Install or declare the missing dependency, then rerun the command.");
+    if (/SyntaxError|Unexpected token/.test(output)) recommendations.push("Inspect the syntax error location shown in the runtime output.");
+    if (findings.some((finding) => finding.rule === "HARDCODED_SECRET")) recommendations.push("Move hardcoded credentials into server-side environment variables and rotate exposed values.");
+    if (findings.some((finding) => finding.rule === "UNSAFE_EVAL")) recommendations.push("Replace dynamic eval/Function execution with explicit, validated logic.");
+    if (runtime?.timedOut) recommendations.push("Check for hanging handles or increase the bounded timeout only after inspecting the command.");
+    return jsonResponse(200, { findings, runtime, recommendations, analysis: "deterministic-static-and-runtime" }, { "x-correlation-id": requestId });
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleTaskflowList({ request, store, taskflow, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  return jsonResponse(200, { plans: taskflow.getForProject(projectId) }, { "x-correlation-id": requestId });
+}
+
+async function handleTaskflowCreate({ request, store, taskflow, persistTaskflow, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const plan = taskflow.create(projectId, await parseJsonBody(request), { persist: persistTaskflow });
+    return jsonResponse(201, plan, { "x-correlation-id": requestId });
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleTaskflowRun({ request, store, taskflow, persistTaskflow, requestId, path }) {
+  const parts = path.split("/");
+  const projectId = parts[4];
+  const planId = parts[6];
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  if (!taskflow.getOwned(projectId, planId)) return jsonResponse(404, { error: { code: "TASKFLOW_NOT_FOUND", message: "TASKFLOW plan not found", requestId } });
+  try {
+    const plan = await taskflow.run(planId, { persist: persistTaskflow });
+    return jsonResponse(200, plan, { "x-correlation-id": requestId });
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleGitHubExport({ request, store, workspace, github, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const body = await parseJsonBody(request);
+    const result = await github.exportProject({
+      repoName: String(body.repoName ?? ""),
+      description: String(body.description ?? access.project.description ?? ""),
+      private: body.private !== false,
+      branch: body.branch ? String(body.branch) : null,
+      artifacts: workspace.list(projectId).map((file) => workspace.read(projectId, file.path)),
+    });
+    return jsonResponse(201, result, { "x-correlation-id": requestId });
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
 }
 
 async function handleApproveWorkflowCheckpoint({ request, store, ai, requestId, path }) {

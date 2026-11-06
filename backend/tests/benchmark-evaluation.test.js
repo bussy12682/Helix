@@ -50,7 +50,7 @@ test('AI Evaluation Benchmark: End-to-end multi-agent evaluation on E-commerce P
   const dbTask = workflow.tasks.find((t) => t.agent === AGENT_ROLES.DATABASE_ENGINEER);
   assert.equal(dbTask.status, 'completed');
   const dbOutput = validateAgentOutput(dbTask.output, AGENT_ROLES.DATABASE_ENGINEER);
-  assert.ok(dbOutput.artifacts.some((a) => a.path.includes('schema.sql')));
+  assert.ok(dbOutput.artifacts.some((a) => a.path === 'database/README.md'));
 
   // Verify Backend output
   const beTask = workflow.tasks.find((t) => t.agent === AGENT_ROLES.BACKEND_ENGINEER);

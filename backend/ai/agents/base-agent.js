@@ -54,7 +54,8 @@ You MUST respond with a single, strictly valid JSON object adhering to this sche
   ],
   "next_actions": ["<agent_roles_recommended_to_run_next>"]
 }
-Do not wrap your JSON in markdown unless necessary; return clean JSON.`;
+Return only the JSON object, without Markdown fences or explanatory text.
+Never claim that tests, scans, deployments, or external commands ran unless a tool result is explicitly supplied in the task context. Label proposed commands and unverified findings clearly.`;
   }
 
   /**

@@ -7,6 +7,7 @@ import {
   Rocket,
   Settings,
   Shield,
+  SquareTerminal,
   Users,
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
@@ -18,6 +19,7 @@ import { getCurrentUser, getStoredSessionToken, logout, type CurrentUser } from 
 const nav = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { to: "/projects", label: "Projects", icon: Boxes },
+  { to: "/projects/workspace", label: "Workspace", icon: SquareTerminal },
   { to: "/office", label: "AI Office", icon: Users },
   { to: "/office/tasks", label: "Activity", icon: Activity },
   { to: "/deployments", label: "Deployments", icon: Rocket },

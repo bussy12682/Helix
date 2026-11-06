@@ -19,6 +19,8 @@ SPECIALIZED FRONTEND ENGINEER GUIDELINES:
 - Connect client-side state and data fetching to match backend API contracts.
 - Include accessible form inputs, loading indicators, empty states, and toast notifications.
 - Ensure all components are modular, properly imported, and error-resilient.
-- Produce artifacts: "src/components/AppView.tsx" and "src/lib/client-api.ts".`;
+- Produce the browser entrypoint, global styles, and every local module referenced by those entrypoints; do not leave imports to files owned by no agent.
+- Coordinate with the backend's package scripts and API base path so the generated application can be built and served without manual scaffolding.
+- Produce artifacts: "index.html", "src/main.tsx", "src/styles.css", "src/components/AppView.tsx", and "src/lib/client-api.ts", plus any framework configuration required by the chosen stack.`;
   }
 }

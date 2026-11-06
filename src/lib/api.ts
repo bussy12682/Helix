@@ -742,3 +742,232 @@ export function subscribeToProjectEvents(
   };
   return () => source.close();
 }
+
+export type WorkspaceFile = {
+  path: string;
+  name: string;
+  type: string;
+  version: number;
+  updatedAt?: string;
+  bytes: number;
+};
+
+export type ExecutionStatus = {
+  available: boolean;
+  isolation: string;
+  network?: string;
+  reason?: string;
+};
+
+export type ExecutionResult = {
+  executed: boolean;
+  status: string;
+  command?: string[];
+  exitCode?: number | null;
+  signal?: string | null;
+  stdout?: string;
+  stderr?: string;
+  error?: string;
+  timedOut?: boolean;
+  outputTruncated?: boolean;
+  durationMs?: number;
+  sandbox?: {
+    isolation: string;
+    network: string;
+    timeoutMs: number;
+    virtualMemoryBytes?: number;
+    nodeHeapBytes?: number;
+  };
+};
+
+export type ExecutionJob = {
+  id: string;
+  projectId: string;
+  kind: "command" | "test" | "install" | "build" | "preview";
+  command: string[];
+  status: "queued" | "running" | "stopping" | "stopped" | "completed" | "failed" | "unavailable";
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  result: ExecutionResult | null;
+};
+
+export type PreviewState = {
+  id: string;
+  projectId: string;
+  status: "starting" | "ready" | "failed" | "stopped";
+  mode: "static" | "server";
+  jobId: string | null;
+  url: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ExecutionEvent = {
+  id?: string;
+  type: string;
+  timestamp: string;
+  projectId?: string;
+  payload?: {
+    job?: ExecutionJob;
+    preview?: PreviewState;
+    jobs?: ExecutionJob[];
+    stream?: "stdout" | "stderr";
+    data?: string;
+  };
+};
+
+export type RepairProposal = {
+  summary: string;
+  files: Array<{ name: string; type: string; path: string; content: string }>;
+  decisions: Array<{ key: string; decision: string; rationale?: string }>;
+  basedOnJobId: string;
+  provider: string;
+  model: string;
+  simulated: boolean;
+  verified: false;
+};
+
+export function resolveApiUrl(path: string) {
+  return `${getBaseUrl()}${path}`;
+}
+
+export async function listWorkspaceFiles(projectId: string, token: string) {
+  return apiRequest<{ files: WorkspaceFile[]; execution: ExecutionStatus }>(
+    `/api/v1/projects/${projectId}/files`,
+    { headers: authHeaders(token) },
+  );
+}
+
+export async function readWorkspaceFile(projectId: string, filePath: string, token: string) {
+  return apiRequest<{ file: WorkspaceFile & { content: string; createdBy?: string } }>(
+    `/api/v1/projects/${projectId}/files?path=${encodeURIComponent(filePath)}`,
+    { headers: authHeaders(token) },
+  );
+}
+
+export async function saveWorkspaceFile(
+  projectId: string,
+  filePath: string,
+  content: string,
+  token: string,
+  expectedVersion?: number,
+) {
+  return apiRequest<{ file: WorkspaceFile & { content: string } }>(
+    `/api/v1/projects/${projectId}/files`,
+    {
+      method: "PUT",
+      headers: authHeaders(token),
+      body: JSON.stringify({ path: filePath, content, ...(expectedVersion === undefined ? {} : { expectedVersion }) }),
+    },
+  );
+}
+
+export async function deleteWorkspaceFile(projectId: string, filePath: string, token: string) {
+  return apiRequest<{ deleted: true }>(
+    `/api/v1/projects/${projectId}/files?path=${encodeURIComponent(filePath)}`,
+    { method: "DELETE", headers: authHeaders(token) },
+  );
+}
+
+export async function executeWorkspaceCommand(projectId: string, command: string, token: string) {
+  return apiRequest<{ job: ExecutionJob }>(`/api/v1/projects/${projectId}/execute`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({ command }),
+  });
+}
+
+export async function runWorkspaceTests(projectId: string, token: string) {
+  return apiRequest<{ job: ExecutionJob }>(`/api/v1/projects/${projectId}/tests`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({}),
+  });
+}
+
+export async function listExecutionJobs(projectId: string, token: string) {
+  return apiRequest<{ jobs: ExecutionJob[]; preview: PreviewState | null; execution: ExecutionStatus }>(
+    `/api/v1/projects/${projectId}/executions`,
+    { headers: authHeaders(token) },
+  );
+}
+
+export async function stopExecutionJob(projectId: string, jobId: string, token: string) {
+  return apiRequest<{ job: ExecutionJob }>(`/api/v1/projects/${projectId}/executions/${jobId}/stop`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({}),
+  });
+}
+
+export async function installWorkspaceDependencies(projectId: string, token: string) {
+  return apiRequest<{ job: ExecutionJob; network: string }>(`/api/v1/projects/${projectId}/install`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({}),
+  });
+}
+
+export async function buildWorkspaceApplication(projectId: string, token: string, command?: string) {
+  return apiRequest<{ job: ExecutionJob }>(`/api/v1/projects/${projectId}/build`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify(command ? { command } : {}),
+  });
+}
+
+export async function getWorkspacePreview(projectId: string, token: string) {
+  return apiRequest<{ preview: PreviewState | null }>(`/api/v1/projects/${projectId}/preview/status`, {
+    headers: authHeaders(token),
+  });
+}
+
+export async function startWorkspacePreview(projectId: string, token: string, command?: string) {
+  return apiRequest<{ preview: PreviewState }>(`/api/v1/projects/${projectId}/preview/start`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify(command ? { command } : {}),
+  });
+}
+
+export async function stopWorkspacePreview(projectId: string, token: string) {
+  return apiRequest<{ preview: PreviewState }>(`/api/v1/projects/${projectId}/preview/stop`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({}),
+  });
+}
+
+export async function proposeWorkspaceRepair(
+  projectId: string,
+  jobId: string,
+  filePath: string | null,
+  token: string,
+) {
+  return apiRequest<RepairProposal>(`/api/v1/projects/${projectId}/repair`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({ jobId, filePath }),
+  });
+}
+
+export function subscribeToExecutionEvents(
+  projectId: string,
+  token: string,
+  handlers: { onEvent: (event: ExecutionEvent) => void; onStatus?: (connected: boolean) => void },
+) {
+  const url = `${getBaseUrl()}/api/v1/projects/${projectId}/executions/stream?token=${encodeURIComponent(token)}`;
+  const source = new EventSource(url);
+  source.onopen = () => handlers.onStatus?.(true);
+  source.onerror = () => handlers.onStatus?.(false);
+  source.onmessage = (message) => {
+    try {
+      handlers.onEvent(JSON.parse(message.data) as ExecutionEvent);
+    } catch {
+      // Ignore malformed frames; the next snapshot will restore state.
+    }
+  };
+  return () => source.close();
+}

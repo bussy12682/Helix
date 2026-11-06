@@ -5,6 +5,9 @@
  */
 
 import { AGENT_CONTRACTS } from './contracts.js';
+import { normalizeWorkspacePath } from '../workspace-paths.js';
+
+export { normalizeWorkspacePath };
 
 export class ToolPermissionError extends Error {
   constructor(agentRole, toolName) {
@@ -16,30 +19,40 @@ export class ToolPermissionError extends Error {
 }
 
 export class ToolRegistry {
-  constructor() {
+  constructor({ testRunner = null } = {}) {
     this.tools = new Map();
     this.virtualFiles = new Map(); // projectId -> Map(filePath -> content)
+    this.testRunner = testRunner;
 
     this.registerCoreTools();
+  }
+
+  setTestRunner(testRunner) {
+    this.testRunner = testRunner;
   }
 
   registerCoreTools() {
     // 1. Virtual workspace write tool
     this.registerTool('virtual_workspace_write', async ({ projectId, filePath, content }) => {
+      const normalized = normalizeWorkspacePath(filePath);
+      if (typeof content !== 'string' || Buffer.byteLength(content) > 2 * 1024 * 1024) {
+        throw new Error('Workspace files must be UTF-8 strings no larger than 2 MiB.');
+      }
       if (!this.virtualFiles.has(projectId)) {
         this.virtualFiles.set(projectId, new Map());
       }
-      this.virtualFiles.get(projectId).set(filePath, content);
-      return { success: true, path: filePath, bytes: content.length };
+      this.virtualFiles.get(projectId).set(normalized, content);
+      return { success: true, path: normalized, bytes: Buffer.byteLength(content) };
     });
 
     // 2. Virtual workspace read tool
     this.registerTool('virtual_workspace_read', async ({ projectId, filePath }) => {
+      const normalized = normalizeWorkspacePath(filePath);
       const files = this.virtualFiles.get(projectId);
-      if (!files || !files.has(filePath)) {
-        return { success: false, error: `File not found: ${filePath}` };
+      if (!files || !files.has(normalized)) {
+        return { success: false, error: `File not found: ${normalized}` };
       }
-      return { success: true, path: filePath, content: files.get(filePath) };
+      return { success: true, path: normalized, content: files.get(normalized) };
     });
 
     // 3. Syntax validation tool
@@ -123,23 +136,16 @@ export class ToolRegistry {
       };
     });
 
-    // 5. Test runner tool
-    this.registerTool('test_runner', async ({ testSuiteName, assertions = [] }) => {
-      const results = assertions.map((a, idx) => ({
-        id: `assertion-${idx + 1}`,
-        description: a.description || `Test case ${idx + 1}`,
-        passed: a.passed !== false,
-      }));
-
-      const passedCount = results.filter((r) => r.passed).length;
-      return {
-        suite: testSuiteName || 'Default Suite',
-        total: results.length,
-        passed: passedCount,
-        failed: results.length - passedCount,
-        status: results.length === passedCount ? 'PASS' : 'FAIL',
-        results,
-      };
+    // 5. Real test execution. Caller-supplied "passed" flags are deliberately ignored.
+    this.registerTool('test_runner', async (args) => {
+      if (!this.testRunner) {
+        return {
+          status: 'UNAVAILABLE',
+          executed: false,
+          error: 'No isolated test execution backend is configured.',
+        };
+      }
+      return this.testRunner(args);
     });
   }
 
