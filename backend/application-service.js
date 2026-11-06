@@ -53,29 +53,55 @@ function rewritePreviewHtml(html, basePath) {
 }
 
 export class ApplicationService extends EventEmitter {
-  constructor({ workspaceService, executionService, frameAncestors = "'self'" }) {
+  constructor({
+    workspaceService,
+    executionService,
+    frameAncestors = "'self'",
+    previewTtlMs = 24 * 60 * 60 * 1000,
+    sweepIntervalMs = 60_000,
+  }) {
     super();
     this.setMaxListeners(0);
     this.workspaceService = workspaceService;
     this.executionService = executionService;
     this.frameAncestors = frameAncestors;
+    // Preview capability lifetime: expired previews stop their job and reject
+    // their token even if the process keeps running.
+    this.previewTtlMs = Math.max(1000, Number(previewTtlMs) || 24 * 60 * 60 * 1000);
     this.previews = new Map();
     this.executionService.on("event", (event) => {
       if (event.type !== "execution_completed") return;
       const job = event.payload?.job;
       if (job?.kind === "install" && job.status === "completed") {
         this.captureInstallArtifacts(event.projectId).catch((error) => {
-          console.error(`[workspace] Could not capture install metadata for ${event.projectId}:`, error.message);
+          console.error(
+            `[workspace] Could not capture install metadata for ${event.projectId}:`,
+            error.message,
+          );
         });
       }
       const preview = this.previews.get(event.projectId);
       if (!preview || preview.jobId !== job?.id || preview.status === "stopped") return;
       preview.status = job.status === "stopped" ? "stopped" : "failed";
-      preview.error = job.status === "stopped" ? null : job.result?.error || `Preview process exited with code ${job.result?.exitCode}`;
+      preview.error =
+        job.status === "stopped"
+          ? null
+          : job.result?.error || `Preview process exited with code ${job.result?.exitCode}`;
       preview.url = null;
       preview.updatedAt = new Date().toISOString();
-      this.emitPreview(preview.status === "stopped" ? "preview_stopped" : "preview_failed", preview);
+      this.emitPreview(
+        preview.status === "stopped" ? "preview_stopped" : "preview_failed",
+        preview,
+      );
     });
+    this.previewSweepTimer = setInterval(() => {
+      try {
+        this.expireStalePreviews();
+      } catch {
+        /* sweeping must never crash the process */
+      }
+    }, sweepIntervalMs);
+    this.previewSweepTimer.unref?.();
   }
 
   applyPreviewHeaders(headers) {
@@ -119,13 +145,20 @@ export class ApplicationService extends EventEmitter {
   }
 
   async captureInstallArtifacts(projectId) {
-    const lock = await this.workspaceService.readDiskFile(projectId, "package-lock.json").catch(() => null);
-    if (lock) await this.workspaceService.write(projectId, "package-lock.json", lock, { createdBy: "npm-install" });
+    const lock = await this.workspaceService
+      .readDiskFile(projectId, "package-lock.json")
+      .catch(() => null);
+    if (lock)
+      await this.workspaceService.write(projectId, "package-lock.json", lock, {
+        createdBy: "npm-install",
+      });
   }
 
   async readPackage(projectId) {
     const root = await this.workspaceService.materialize(projectId);
-    const packageJson = await this.workspaceService.readDiskFile(projectId, "package.json").catch(() => null);
+    const packageJson = await this.workspaceService
+      .readDiskFile(projectId, "package.json")
+      .catch(() => null);
     if (!packageJson) return { root, packageJson: null };
     try {
       return { root, packageJson: JSON.parse(packageJson) };
@@ -136,8 +169,11 @@ export class ApplicationService extends EventEmitter {
 
   async install(projectId) {
     const { packageJson } = await this.readPackage(projectId);
-    if (!packageJson) throw new Error("A package.json file is required for dependency installation");
-    const lock = await this.workspaceService.readDiskFile(projectId, "package-lock.json").catch(() => null);
+    if (!packageJson)
+      throw new Error("A package.json file is required for dependency installation");
+    const lock = await this.workspaceService
+      .readDiskFile(projectId, "package-lock.json")
+      .catch(() => null);
     const command = lock
       ? ["npm", "ci", "--no-audit", "--no-fund"]
       : ["npm", "install", "--no-audit", "--no-fund"];
@@ -153,7 +189,8 @@ export class ApplicationService extends EventEmitter {
     let resolved = command;
     if (!resolved) {
       const { packageJson } = await this.readPackage(projectId);
-      if (!packageJson?.scripts?.build) throw new Error("package.json does not define a build script");
+      if (!packageJson?.scripts?.build)
+        throw new Error("package.json does not define a build script");
       resolved = ["npm", "run", "build"];
     }
     return this.executionService.start(projectId, {
@@ -164,6 +201,7 @@ export class ApplicationService extends EventEmitter {
   }
 
   getPreview(projectId) {
+    this.expireStalePreviews();
     const preview = this.previews.get(projectId);
     return preview ? this.toPublicPreview(preview) : null;
   }
@@ -201,7 +239,16 @@ export class ApplicationService extends EventEmitter {
       preview.port = await availablePort();
       let resolvedCommand = command;
       if (!resolvedCommand && packageJson.scripts.dev) {
-        resolvedCommand = ["npm", "run", "dev", "--", "--host", "127.0.0.1", "--port", String(preview.port)];
+        resolvedCommand = [
+          "npm",
+          "run",
+          "dev",
+          "--",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          String(preview.port),
+        ];
       } else if (!resolvedCommand) {
         resolvedCommand = ["npm", "start"];
       }
@@ -218,7 +265,10 @@ export class ApplicationService extends EventEmitter {
       preview.url = this.previewUrl(projectId, preview.token);
       this.emitPreview("preview_starting", preview);
       await this.waitUntilReady(preview, job);
-      if (job.completedAt) throw new Error(job.result?.error || `Preview process exited with code ${job.result?.exitCode}`);
+      if (job.completedAt)
+        throw new Error(
+          job.result?.error || `Preview process exited with code ${job.result?.exitCode}`,
+        );
       preview.status = "ready";
       preview.updatedAt = new Date().toISOString();
       this.emitPreview("preview_ready", preview);
@@ -254,7 +304,8 @@ export class ApplicationService extends EventEmitter {
       }
       await delay(250);
     }
-    if (!job.completedAt && !job.stopRequested) throw new Error("Preview did not open the expected port within 30 seconds");
+    if (!job.completedAt && !job.stopRequested)
+      throw new Error("Preview did not open the expected port within 30 seconds");
   }
 
   stopPreview(projectId) {
@@ -269,28 +320,58 @@ export class ApplicationService extends EventEmitter {
   }
 
   authorize(projectId, token) {
+    this.expireStalePreviews();
     const preview = this.previews.get(projectId);
-    if (!preview || preview.status !== "ready" || !safeTokenEqual(preview.token, token)) return null;
+    if (!preview || preview.status !== "ready" || !safeTokenEqual(preview.token, token))
+      return null;
     return preview;
+  }
+
+  /**
+   * Enforces the preview capability TTL: expired previews stop their job and
+   * have their token rejected even while the process keeps running.
+   */
+  expireStalePreviews() {
+    const now = Date.now();
+    for (const preview of this.previews.values()) {
+      if (preview.status !== "ready" && preview.status !== "starting") continue;
+      if (now - Date.parse(preview.createdAt) < this.previewTtlMs) continue;
+      preview.status = "expired";
+      preview.error = `Preview exceeded its configured lifetime (${this.previewTtlMs}ms)`;
+      preview.url = null;
+      preview.updatedAt = new Date().toISOString();
+      if (preview.jobId) this.executionService.stop(preview.projectId, preview.jobId);
+      this.emitPreview("preview_expired", preview);
+    }
   }
 
   async proxy(preview, request) {
     const url = new URL(request.url);
     const prefix = `/api/v1/projects/${preview.projectId}/preview`;
     const basePath = `${prefix}/${preview.token}`;
-    const requestedPath = url.pathname === basePath
-      ? ""
-      : url.pathname.startsWith(`${basePath}/`)
-        ? url.pathname.slice(basePath.length + 1)
-        : url.pathname.startsWith(`${prefix}/`)
-          ? url.pathname.slice(prefix.length + 1)
-          : "";
+    const requestedPath =
+      url.pathname === basePath
+        ? ""
+        : url.pathname.startsWith(`${basePath}/`)
+          ? url.pathname.slice(basePath.length + 1)
+          : url.pathname.startsWith(`${prefix}/`)
+            ? url.pathname.slice(prefix.length + 1)
+            : "";
     url.searchParams.delete("token");
     if (preview.mode === "static") return this.proxyStatic(preview, requestedPath, basePath);
 
     const target = `http://127.0.0.1:${preview.port}/${requestedPath}${url.search}`;
     const headers = new Headers(request.headers);
-    for (const header of ["host", "connection", "content-length", "authorization", "cookie", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto"]) {
+    for (const header of [
+      "host",
+      "connection",
+      "content-length",
+      "authorization",
+      "cookie",
+      "x-forwarded-for",
+      "x-forwarded-host",
+      "x-forwarded-proto",
+    ]) {
       headers.delete(header);
     }
     headers.set("host", `127.0.0.1:${preview.port}`);
@@ -305,13 +386,22 @@ export class ApplicationService extends EventEmitter {
         signal: AbortSignal.timeout(30000),
       });
     } catch (error) {
-      return new Response(JSON.stringify({ error: { code: "PREVIEW_UNAVAILABLE", message: error.message } }), {
-        status: 502,
-        headers: this.applyPreviewHeaders(new Headers({ "content-type": "application/json" })),
-      });
+      return new Response(
+        JSON.stringify({ error: { code: "PREVIEW_UNAVAILABLE", message: error.message } }),
+        {
+          status: 502,
+          headers: this.applyPreviewHeaders(new Headers({ "content-type": "application/json" })),
+        },
+      );
     }
     const responseHeaders = new Headers(response.headers);
-    for (const header of ["connection", "content-length", "content-encoding", "transfer-encoding", "set-cookie"]) {
+    for (const header of [
+      "connection",
+      "content-length",
+      "content-encoding",
+      "transfer-encoding",
+      "set-cookie",
+    ]) {
       responseHeaders.delete(header);
     }
     this.applyPreviewHeaders(responseHeaders);
@@ -320,7 +410,9 @@ export class ApplicationService extends EventEmitter {
       responseHeaders.set("location", `${basePath}${location}`);
     }
     const isHtml = responseHeaders.get("content-type")?.toLowerCase().startsWith("text/html");
-    const bodyContent = isHtml ? rewritePreviewHtml(await response.text(), basePath) : response.body;
+    const bodyContent = isHtml
+      ? rewritePreviewHtml(await response.text(), basePath)
+      : response.body;
     return new Response(bodyContent, { status: response.status, headers: responseHeaders });
   }
 
@@ -337,21 +429,26 @@ export class ApplicationService extends EventEmitter {
         const fallback = preview.directory ? `${preview.directory}/index.html` : "index.html";
         content = await this.workspaceService.readDiskBuffer(preview.projectId, fallback);
       }
-      const type = MIME_TYPES[path.posix.extname(relative).toLowerCase()] || "application/octet-stream";
+      const type =
+        MIME_TYPES[path.posix.extname(relative).toLowerCase()] || "application/octet-stream";
       const headers = this.applyPreviewHeaders(new Headers({ "content-type": type }));
       const body = type.startsWith("text/html")
         ? rewritePreviewHtml(content.toString("utf8"), basePath)
         : content;
       return new Response(body, { status: 200, headers });
     } catch (error) {
-      return new Response(JSON.stringify({ error: { code: "PREVIEW_FILE_NOT_FOUND", message: error.message } }), {
-        status: 404,
-        headers: this.applyPreviewHeaders(new Headers({ "content-type": "application/json" })),
-      });
+      return new Response(
+        JSON.stringify({ error: { code: "PREVIEW_FILE_NOT_FOUND", message: error.message } }),
+        {
+          status: 404,
+          headers: this.applyPreviewHeaders(new Headers({ "content-type": "application/json" })),
+        },
+      );
     }
   }
 
   close() {
+    if (this.previewSweepTimer) clearInterval(this.previewSweepTimer);
     for (const preview of this.previews.values()) {
       if (preview.jobId) this.executionService.stop(preview.projectId, preview.jobId);
     }

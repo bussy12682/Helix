@@ -155,6 +155,7 @@ export function createApp(overrides = {}) {
       frameAncestors: config.corsOrigins.includes("*")
         ? "*"
         : config.corsOrigins.join(" ") || "'self'",
+      previewTtlMs: config.previewTtlMs,
     });
   const taskflow = overrides.taskflow ?? new TaskflowEngine({ executionService: execution });
   taskflow.hydrate(store.listTaskflows());
@@ -308,11 +309,30 @@ export function createApp(overrides = {}) {
     registerRateLimiter,
     passwordResetRateLimiter,
     async request(input, init = {}) {
-      const request = input instanceof Request ? input : new Request(input, init);
+      let request = input instanceof Request ? input : new Request(input, init);
       const requestId = randomUUID();
       const startedAt = Date.now();
       let response;
       try {
+        // Opt-in cookie sessions: when enabled and no bearer header is present,
+        // promote the httpOnly session cookie to the standard bearer path so
+        // every route accepts either credential without per-handler changes.
+        // SameSite=Lax already stops the browser from sending the cookie on
+        // cross-site writes; bearer tokens remain the cross-origin mechanism.
+        if (config.cookieSessions && !request.headers.get("authorization")) {
+          const cookieToken = sessionCookieToken(request, config.sessionCookieName);
+          if (cookieToken) {
+            request = new Request(request.url, {
+              method: request.method,
+              headers: new Headers([
+                ...request.headers,
+                ["authorization", `Bearer ${cookieToken}`],
+              ]),
+              body: ["GET", "HEAD"].includes(request.method) ? undefined : request.body,
+              duplex: ["GET", "HEAD"].includes(request.method) ? undefined : "half",
+            });
+          }
+        }
         const declaredLength = Number(request.headers.get("content-length") ?? 0);
         if (declaredLength > config.maxBodyBytes) {
           throw new HttpError(
@@ -531,7 +551,7 @@ async function handleRequest({
   }
 
   if (request.method === "POST" && path === "/api/v1/auth/logout") {
-    return handleLogout({ request, store, requestId });
+    return handleLogout({ request, config, store, requestId });
   }
 
   if (request.method === "POST" && path === "/api/v1/auth/change-password") {
@@ -916,6 +936,45 @@ function publicUser(user) {
   };
 }
 
+const SESSION_COOKIE_ATTRIBUTES = {
+  httpOnly: true,
+  sameSite: "Lax", // cookies are not sent on cross-site POSTs; bearer remains the cross-origin path
+  path: "/",
+};
+
+function sessionCookieHeader(name, token, { maxAgeSeconds, secure }) {
+  return [
+    `${name}=${token}`,
+    `Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}`,
+    `Path=${SESSION_COOKIE_ATTRIBUTES.path}`,
+    "HttpOnly",
+    `SameSite=${SESSION_COOKIE_ATTRIBUTES.sameSite}`,
+    ...(secure ? ["Secure"] : []),
+  ].join("; ");
+}
+
+function clearedSessionCookieHeader(name, { secure }) {
+  return sessionCookieHeader(name, "", { maxAgeSeconds: 0, secure });
+}
+
+function sessionCookieToken(request, name) {
+  const header = request.headers.get("cookie") ?? "";
+  for (const part of header.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 0) continue;
+    if (part.slice(0, separator).trim() === name) return part.slice(separator + 1).trim() || null;
+  }
+  return null;
+}
+
+function originAllowedForCookies(request, config) {
+  const origin = request.headers.get("origin");
+  if (!origin) return true; // same-origin/non-browser client
+  return config.corsOrigins.includes("*")
+    ? false
+    : config.corsOrigins.includes(origin.replace(/\/$/, ""));
+}
+
 function bearerToken(request) {
   const header = request.headers.get("authorization") ?? "";
   return header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : null;
@@ -1042,10 +1101,16 @@ async function handleUpdateMe({ request, store, requestId }) {
   return jsonResponse(200, { user: publicUser(user) }, { "x-correlation-id": requestId });
 }
 
-async function handleLogout({ request, store, requestId }) {
+async function handleLogout({ request, config, store, requestId }) {
   const token = bearerToken(request);
   if (token) store.deleteSession(token);
-  return jsonResponse(200, { message: "Logged out" }, { "x-correlation-id": requestId });
+  const headers = { "x-correlation-id": requestId };
+  if (config.cookieSessions) {
+    headers["set-cookie"] = clearedSessionCookieHeader(config.sessionCookieName, {
+      secure: config.nodeEnv === "production",
+    });
+  }
+  return jsonResponse(200, { message: "Logged out" }, headers);
 }
 
 async function handleChangePassword({ request, config, store, requestId }) {
@@ -1343,19 +1408,32 @@ async function handleLogin({ request, config, store, loginRateLimiter, audit, re
   loginRateLimiter.reset(`login:${email}`);
   audit.record({ type: "auth.login", userId: user.id, outcome: "success", details: { email } });
 
-  return jsonResponse(200, {
-    token: session.token,
-    user: {
-      id: user.id,
-      name: user.name,
-      email: user.email,
+  const headers = { "x-correlation-id": requestId };
+  if (config.cookieSessions && originAllowedForCookies(request, config)) {
+    const maxAgeSeconds = rememberMe ? 30 * 24 * 60 * 60 : 8 * 60 * 60;
+    headers["set-cookie"] = sessionCookieHeader(config.sessionCookieName, session.token, {
+      maxAgeSeconds,
+      secure: config.nodeEnv === "production",
+    });
+  }
+
+  return jsonResponse(
+    200,
+    {
+      token: session.token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+      },
+      expiresAt: session.expiresAt,
+      rememberMe: session.rememberMe,
     },
-    expiresAt: session.expiresAt,
-    rememberMe: session.rememberMe,
-  });
+    headers,
+  );
 }
 
-async function handleDemoLogin({ config, store, requestId }) {
+async function handleDemoLogin({ request, config, store, requestId }) {
   if (!config.demoLoginEnabled) {
     return jsonResponse(403, {
       error: {
@@ -1380,6 +1458,14 @@ async function handleDemoLogin({ config, store, requestId }) {
     store.updateUser(user.id, { emailVerified: true, emailVerificationToken: null });
   const session = store.createSession(user.id, true);
 
+  const demoHeaders = { "x-correlation-id": requestId };
+  if (config.cookieSessions && originAllowedForCookies(request, config)) {
+    demoHeaders["set-cookie"] = sessionCookieHeader(config.sessionCookieName, session.token, {
+      maxAgeSeconds: 30 * 24 * 60 * 60,
+      secure: config.nodeEnv === "production",
+    });
+  }
+
   return jsonResponse(
     200,
     {
@@ -1388,7 +1474,7 @@ async function handleDemoLogin({ config, store, requestId }) {
       expiresAt: session.expiresAt,
       rememberMe: true,
     },
-    { "x-correlation-id": requestId },
+    demoHeaders,
   );
 }
 

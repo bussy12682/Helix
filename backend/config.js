@@ -22,6 +22,12 @@ export function loadConfig(env = process.env) {
     ),
     maxActiveJobsPerProject: Math.max(1, Number(env.HELIX_MAX_ACTIVE_JOBS_PER_PROJECT ?? 25)),
     autonomousAutoApprove: env.HELIX_AUTONOMOUS_AUTO_APPROVE === "true",
+    // Security: opt-in httpOnly cookie sessions alongside bearer tokens, and a
+    // configurable preview capability TTL. Cookies are only issued when the
+    // request origin is an allowed CORS origin.
+    cookieSessions: env.HELIX_COOKIE_SESSIONS === "true",
+    sessionCookieName: "helix_session",
+    previewTtlMs: Math.max(1000, Number(env.HELIX_PREVIEW_TTL_MS ?? 24 * 60 * 60 * 1000)),
     storagePath: env.HELIX_STORAGE_PATH ?? ".data/helix-state.json",
     workspaceRoot: env.HELIX_WORKSPACE_ROOT ?? ".data/workspaces",
     databaseUrl,
