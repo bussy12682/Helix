@@ -53,24 +53,28 @@ test("database foundation reports an unreachable PostgreSQL server honestly", as
   assert.ok(state.error.length > 0);
 });
 
-test("database foundation verifies a reachable PostgreSQL server with its real migrations", { skip: process.env.HELIX_PG_TEST_URL ? false : "set HELIX_PG_TEST_URL to run the live probe" }, async () => {
-  const { provisionDatabase } = await import("./postgres-store-helpers.js");
-  const db = await provisionDatabase(process.env.HELIX_PG_TEST_URL);
-  try {
-    const { createPostgresStore } = await import("../storage-postgres.js");
-    const store = createPostgresStore({ connectionString: db.url });
-    await store.ready;
-    await store.close();
+test(
+  "database foundation verifies a reachable PostgreSQL server with its real migrations",
+  { skip: process.env.HELIX_PG_TEST_URL ? false : "set HELIX_PG_TEST_URL to run the live probe" },
+  async () => {
+    const { provisionDatabase } = await import("./postgres-store-helpers.js");
+    const db = await provisionDatabase(process.env.HELIX_PG_TEST_URL);
+    try {
+      const { createPostgresStore } = await import("../storage-postgres.js");
+      const store = createPostgresStore({ connectionString: db.url });
+      await store.ready;
+      await store.close();
 
-    const foundation = createDatabaseFoundation({ databaseUrl: db.url, nodeEnv: "production" });
-    const state = await foundation.init();
-    assert.equal(state.status, "postgres-ready");
-    assert.ok(state.migrations.includes("001_core_entities.sql"));
-    assert.equal(state.error, null);
-  } finally {
-    await db.dispose();
-  }
-});
+      const foundation = createDatabaseFoundation({ databaseUrl: db.url, nodeEnv: "production" });
+      const state = await foundation.init();
+      assert.equal(state.status, "postgres-ready");
+      assert.ok(state.migrations.includes("001_core_entities.sql"));
+      assert.equal(state.error, null);
+    } finally {
+      await db.dispose();
+    }
+  },
+);
 
 test("project storage survives a backend restart when a storage path is configured", () => {
   const directory = mkdtempSync(join(tmpdir(), "helix-storage-"));

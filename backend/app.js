@@ -21,6 +21,7 @@ import { ApplicationService } from "./application-service.js";
 import { RepairService } from "./repair-service.js";
 import { AutonomousPipeline } from "./autonomous-pipeline.js";
 import { buildProjectContext, formatProjectContextForPrompt } from "./project-context.js";
+import { createLogger } from "./logger.js";
 
 const DEFAULT_SECRET = "development-secret-change-me";
 
@@ -104,6 +105,7 @@ function applyStandardHeaders(response, { config, request, requestId }) {
 
 export function createApp(overrides = {}) {
   const config = loadConfig(overrides.env ?? process.env);
+  const logger = overrides.logger ?? createLogger({ component: "api", level: config.logLevel });
   if (
     config.nodeEnv === "production" &&
     (!config.jwtSecret ||
@@ -115,7 +117,10 @@ export function createApp(overrides = {}) {
   const store =
     overrides.store ??
     (config.databaseUrl && /^postgres(ql)?:\/\//i.test(config.databaseUrl)
-      ? createPostgresStore({ connectionString: config.databaseUrl, poolSize: config.databasePoolSize ?? 10 })
+      ? createPostgresStore({
+          connectionString: config.databaseUrl,
+          poolSize: config.databasePoolSize ?? 10,
+        })
       : createMemoryStore({ storagePath: overrides.storagePath ?? config.storagePath }));
   const ai = overrides.ai ?? createAiSubsystem(config);
   bindAiToStore(ai, store);
@@ -123,16 +128,26 @@ export function createApp(overrides = {}) {
   // the AI subsystem (workspaces, traces) sees the hydrated data.
   if (store.ready) store.ready.then(() => bindAiToStore(ai, store)).catch(() => {});
   const workspace =
-    overrides.workspace ?? new WorkspaceService({ root: config.workspaceRoot, contextManager: ai.contextManager });
+    overrides.workspace ??
+    new WorkspaceService({ root: config.workspaceRoot, contextManager: ai.contextManager });
   const execution =
     overrides.execution ??
-    new ExecutionService({ workspaceService: workspace, maxConcurrent: config.executionMaxConcurrent });
+    new ExecutionService({
+      workspaceService: workspace,
+      maxConcurrent: config.executionMaxConcurrent,
+      persistence: {
+        saveJob: (job) => store.saveExecutionJob?.(job),
+        deleteJob: (id) => store.deleteExecutionJob?.(id),
+      },
+    });
   const applications =
     overrides.applications ??
     new ApplicationService({
       workspaceService: workspace,
       executionService: execution,
-      frameAncestors: config.corsOrigins.includes("*") ? "*" : config.corsOrigins.join(" ") || "'self'",
+      frameAncestors: config.corsOrigins.includes("*")
+        ? "*"
+        : config.corsOrigins.join(" ") || "'self'",
     });
   const taskflow = overrides.taskflow ?? new TaskflowEngine({ executionService: execution });
   taskflow.hydrate(store.listTaskflows());
@@ -170,6 +185,10 @@ export function createApp(overrides = {}) {
           ].slice(-10),
         });
       },
+      persistence: {
+        saveRunRecord: (run) => store.savePipelineRun?.(run),
+        deleteRunRecord: (id) => store.deletePipelineRun?.(id),
+      },
     });
   ai.toolRegistry.setTestRunner((args) => execution.runTests(args.projectId, args));
   const loginRateLimiter = new RateLimiter();
@@ -183,6 +202,7 @@ export function createApp(overrides = {}) {
     config,
     store,
     ai,
+    logger,
     workspace,
     execution,
     applications,
@@ -196,6 +216,7 @@ export function createApp(overrides = {}) {
     async request(input, init = {}) {
       const request = input instanceof Request ? input : new Request(input, init);
       const requestId = randomUUID();
+      const startedAt = Date.now();
       let response;
       try {
         const declaredLength = Number(request.headers.get("content-length") ?? 0);
@@ -219,6 +240,7 @@ export function createApp(overrides = {}) {
           github,
           repair,
           pipeline,
+          recovery: () => app.recovery,
           loginRateLimiter,
           registerRateLimiter,
           passwordResetRateLimiter,
@@ -230,27 +252,79 @@ export function createApp(overrides = {}) {
             error: { code: error.code, message: error.message, requestId },
           });
         } else {
-          console.error(`[${requestId}] Unhandled error:`, error);
+          logger.error("unhandled request error", {
+            requestId,
+            method: request.method,
+            path: new URL(request.url).pathname,
+            error: error.message,
+            stack: error.stack?.split("\n", 3).join(" | "),
+          });
           response = jsonResponse(500, {
             error: { code: "INTERNAL_SERVER_ERROR", message: "Unexpected server error", requestId },
           });
         }
       }
-      return applyStandardHeaders(response, { config, request, requestId });
+      const finalResponse = applyStandardHeaders(response, { config, request, requestId });
+      logger.info("request", {
+        requestId,
+        method: request.method,
+        path: new URL(request.url).pathname,
+        status: finalResponse.status,
+        durationMs: Date.now() - startedAt,
+      });
+      return finalResponse;
     },
     close() {
       applications.close();
       execution.close();
       if (typeof store.close === "function") {
-        return store.close().catch((error) => console.error("[storage] close failed:", error.message));
+        return store
+          .close()
+          .catch((error) => logger.error("storage close failed", { error: error.message }));
       }
       store.flush();
       return Promise.resolve();
     },
   };
 
-  app.ready = store.ready ? store.ready.then(() => undefined) : Promise.resolve();
-  app.getStatus = () => (typeof store.getStatus === "function" ? store.getStatus() : { mode: store.mode });
+  /**
+   * Boot recovery: after the store is ready (PostgreSQL migrations + hydration,
+   * or synchronous memory/file hydration), restore durable job and pipeline-run
+   * records, then finalize anything that was mid-flight when the previous
+   * process died. listen() waits on this so traffic only flows after recovery.
+   */
+  const recoverPersistentState = async () => {
+    const summary = {
+      hydratedExecutionJobs: 0,
+      interruptedExecutionJobs: 0,
+      hydratedPipelineRuns: 0,
+      interruptedPipelineRuns: 0,
+      recoveredAt: new Date().toISOString(),
+    };
+    try {
+      summary.hydratedExecutionJobs =
+        execution.hydrateJobs?.(store.listExecutionJobs?.() ?? []) ?? 0;
+      summary.interruptedExecutionJobs = execution.recoverInterrupted?.() ?? 0;
+      summary.hydratedPipelineRuns = pipeline.hydrateRuns?.(store.listPipelineRuns?.() ?? []) ?? 0;
+      summary.interruptedPipelineRuns = pipeline.recoverInterrupted?.() ?? 0;
+      if (summary.interruptedExecutionJobs || summary.interruptedPipelineRuns) {
+        logger.warn("recovered interrupted work from a previous process", {
+          interruptedExecutionJobs: summary.interruptedExecutionJobs,
+          interruptedPipelineRuns: summary.interruptedPipelineRuns,
+        });
+      } else {
+        logger.info("boot recovery complete", summary);
+      }
+    } catch (error) {
+      logger.error("boot recovery failed", { error: error.message });
+    }
+    app.recovery = summary;
+    return summary;
+  };
+
+  app.ready = (store.ready ?? Promise.resolve()).then(recoverPersistentState).then(() => undefined);
+  app.getStatus = () =>
+    typeof store.getStatus === "function" ? store.getStatus() : { mode: store.mode };
 
   app.fetch = app.request.bind(app);
   return app;
@@ -269,6 +343,7 @@ async function handleRequest({
   github,
   repair,
   pipeline,
+  recovery,
   loginRateLimiter,
   registerRateLimiter,
   passwordResetRateLimiter,
@@ -282,14 +357,42 @@ async function handleRequest({
   }
 
   if (request.method === "GET" && path === "/api/v1/health") {
+    // Honest readiness: storage health, sandbox execution availability, provider
+    // configuration, and boot-recovery state. The legacy string fields (storage,
+    // ai) stay stable for existing consumers; `readiness` carries the detail.
+    const storeStatus =
+      typeof store.getStatus === "function" ? store.getStatus() : { mode: store.mode ?? "memory" };
+    let executionReadiness = { available: null };
+    try {
+      executionReadiness =
+        typeof execution.getStatus === "function"
+          ? await execution.getStatus()
+          : executionReadiness;
+    } catch (error) {
+      executionReadiness = { available: false, reason: error.message };
+    }
+    const storeDegraded =
+      Boolean(storeStatus.lastWriteError) || (storeStatus.pendingWrites ?? 0) > 0;
     return jsonResponse(200, {
       ok: true,
       service: "helix-core",
-      status: "healthy",
+      status: storeDegraded ? "degraded" : "healthy",
       requestId,
       environment: config.nodeEnv,
-      storage: store.mode ?? (config.storagePath === ":memory:" ? "memory" : "file"),
+      storage: storeStatus.mode ?? "memory",
       ai: ai.modelRouter?.getStatus?.() ?? null,
+      readiness: {
+        storage: storeStatus,
+        execution: {
+          ...executionReadiness,
+          active: execution.active ?? null,
+          trackedJobs: execution.jobs?.size ?? null,
+          maxConcurrent: execution.maxConcurrent ?? null,
+        },
+        providers: ai.modelRouter?.getStatus?.() ?? null,
+        recovery: recovery?.() ?? null,
+      },
+      uptimeSeconds: Math.round(process.uptime()),
       timestamp: new Date().toISOString(),
     });
   }
@@ -416,12 +519,24 @@ async function handleRequest({
     return handleExecutionList({ request, store, execution, applications, requestId, path });
   }
   if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/executions\/stream$/.test(path)) {
-    return handleExecutionStream({ request, store, execution, applications, repair, pipeline, requestId, path });
+    return handleExecutionStream({
+      request,
+      store,
+      execution,
+      applications,
+      repair,
+      pipeline,
+      requestId,
+      path,
+    });
   }
   if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/executions\/[^/]+$/.test(path)) {
     return handleExecutionGet({ request, store, execution, requestId, path });
   }
-  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/executions\/[^/]+\/stop$/.test(path)) {
+  if (
+    request.method === "POST" &&
+    /^\/api\/v1\/projects\/[^/]+\/executions\/[^/]+\/stop$/.test(path)
+  ) {
     return handleExecutionStop({ request, store, execution, requestId, path });
   }
   if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/install$/.test(path)) {
@@ -457,7 +572,10 @@ async function handleRequest({
   if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/pipeline\/runs$/.test(path)) {
     return handlePipelineList({ request, store, pipeline, requestId, path });
   }
-  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/pipeline\/runs\/[^/]+$/.test(path)) {
+  if (
+    request.method === "GET" &&
+    /^\/api\/v1\/projects\/[^/]+\/pipeline\/runs\/[^/]+$/.test(path)
+  ) {
     return handlePipelineGet({ request, store, pipeline, requestId, path });
   }
   if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/debug$/.test(path)) {
@@ -469,7 +587,10 @@ async function handleRequest({
   if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/taskflows$/.test(path)) {
     return handleTaskflowCreate({ request, store, taskflow, persistTaskflow, requestId, path });
   }
-  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/taskflows\/[^/]+\/run$/.test(path)) {
+  if (
+    request.method === "POST" &&
+    /^\/api\/v1\/projects\/[^/]+\/taskflows\/[^/]+\/run$/.test(path)
+  ) {
     return handleTaskflowRun({ request, store, taskflow, persistTaskflow, requestId, path });
   }
   if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/github\/export$/.test(path)) {
@@ -1780,13 +1901,20 @@ async function handleGetProjectArtifacts({ request, store, ai, requestId, path }
 
 function workspaceErrorResponse(error, requestId) {
   if (error instanceof GitHubExportError) {
-    const status = error.code === "GITHUB_NOT_CONFIGURED" || error.code === "GITHUB_UNAVAILABLE" ? 503 : error.code === "GITHUB_EXPORT_FAILED" ? 502 : 400;
+    const status =
+      error.code === "GITHUB_NOT_CONFIGURED" || error.code === "GITHUB_UNAVAILABLE"
+        ? 503
+        : error.code === "GITHUB_EXPORT_FAILED"
+          ? 502
+          : 400;
     return jsonResponse(status, { error: { code: error.code, message: error.message, requestId } });
   }
   if (error instanceof TaskflowValidationError) {
     return jsonResponse(400, { error: { code: error.code, message: error.message, requestId } });
   }
-  return jsonResponse(400, { error: { code: "WORKSPACE_REQUEST_FAILED", message: error.message, requestId } });
+  return jsonResponse(400, {
+    error: { code: "WORKSPACE_REQUEST_FAILED", message: error.message, requestId },
+  });
 }
 
 function workspaceProjectId(path) {
@@ -1801,10 +1929,17 @@ async function handleWorkspaceFiles({ request, store, workspace, execution, requ
     const filePath = new URL(request.url).searchParams.get("path");
     if (filePath) {
       const file = workspace.read(projectId, filePath);
-      if (!file) return jsonResponse(404, { error: { code: "FILE_NOT_FOUND", message: "Workspace file not found", requestId } });
+      if (!file)
+        return jsonResponse(404, {
+          error: { code: "FILE_NOT_FOUND", message: "Workspace file not found", requestId },
+        });
       return jsonResponse(200, { file }, { "x-correlation-id": requestId });
     }
-    return jsonResponse(200, { files: workspace.list(projectId), execution: await execution.getStatus() }, { "x-correlation-id": requestId });
+    return jsonResponse(
+      200,
+      { files: workspace.list(projectId), execution: await execution.getStatus() },
+      { "x-correlation-id": requestId },
+    );
   } catch (error) {
     return workspaceErrorResponse(error, requestId);
   }
@@ -1819,10 +1954,18 @@ async function handleWorkspaceWrite({ request, store, workspace, requestId, path
     if (body.expectedVersion !== undefined) {
       const existing = workspace.read(projectId, String(body.path ?? ""));
       if (!existing || existing.version !== Number(body.expectedVersion)) {
-        return jsonResponse(409, { error: { code: "FILE_VERSION_CONFLICT", message: "The file changed after it was loaded. Reload before saving.", requestId } });
+        return jsonResponse(409, {
+          error: {
+            code: "FILE_VERSION_CONFLICT",
+            message: "The file changed after it was loaded. Reload before saving.",
+            requestId,
+          },
+        });
       }
     }
-    const file = await workspace.write(projectId, String(body.path ?? ""), body.content, { createdBy: access.user.id });
+    const file = await workspace.write(projectId, String(body.path ?? ""), body.content, {
+      createdBy: access.user.id,
+    });
     return jsonResponse(200, { file }, { "x-correlation-id": requestId });
   } catch (error) {
     return workspaceErrorResponse(error, requestId);
@@ -1836,7 +1979,10 @@ async function handleWorkspaceDelete({ request, store, workspace, requestId, pat
   try {
     const filePath = new URL(request.url).searchParams.get("path") ?? "";
     const deleted = await workspace.delete(projectId, filePath);
-    if (!deleted) return jsonResponse(404, { error: { code: "FILE_NOT_FOUND", message: "Workspace file not found", requestId } });
+    if (!deleted)
+      return jsonResponse(404, {
+        error: { code: "FILE_NOT_FOUND", message: "Workspace file not found", requestId },
+      });
     return jsonResponse(200, { deleted: true }, { "x-correlation-id": requestId });
   } catch (error) {
     return workspaceErrorResponse(error, requestId);
@@ -1850,11 +1996,18 @@ async function handleWorkspaceExecute({ request, store, execution, requestId, pa
   try {
     const body = await parseJsonBody(request);
     if (body.wait === true) {
-      const result = await execution.execute(projectId, { command: body.command, timeoutMs: body.timeoutMs });
+      const result = await execution.execute(projectId, {
+        command: body.command,
+        timeoutMs: body.timeoutMs,
+      });
       return jsonResponse(200, result, { "x-correlation-id": requestId });
     }
     const job = execution.start(projectId, { command: body.command, timeoutMs: body.timeoutMs });
-    return jsonResponse(202, { job: execution.toPublicJob(job) }, { "x-correlation-id": requestId });
+    return jsonResponse(
+      202,
+      { job: execution.toPublicJob(job) },
+      { "x-correlation-id": requestId },
+    );
   } catch (error) {
     return workspaceErrorResponse(error, requestId);
   }
@@ -1872,7 +2025,11 @@ async function handleWorkspaceTests({ request, store, execution, requestId, path
       testSuiteName: String(body.testSuiteName ?? "Project tests").slice(0, 200),
       kind: "test",
     });
-    return jsonResponse(202, { job: execution.toPublicJob(job) }, { "x-correlation-id": requestId });
+    return jsonResponse(
+      202,
+      { job: execution.toPublicJob(job) },
+      { "x-correlation-id": requestId },
+    );
   } catch (error) {
     return workspaceErrorResponse(error, requestId);
   }
@@ -1882,11 +2039,15 @@ async function handleExecutionList({ request, store, execution, applications, re
   const projectId = workspaceProjectId(path);
   const access = requireProjectAccess(request, store, projectId, requestId);
   if ("error" in access) return access.error;
-  return jsonResponse(200, {
-    jobs: execution.listJobs(projectId),
-    preview: applications.getPreview(projectId),
-    execution: await execution.getStatus(),
-  }, { "x-correlation-id": requestId });
+  return jsonResponse(
+    200,
+    {
+      jobs: execution.listJobs(projectId),
+      preview: applications.getPreview(projectId),
+      execution: await execution.getStatus(),
+    },
+    { "x-correlation-id": requestId },
+  );
 }
 
 async function handleExecutionGet({ request, store, execution, requestId, path }) {
@@ -1895,7 +2056,10 @@ async function handleExecutionGet({ request, store, execution, requestId, path }
   const access = requireProjectAccess(request, store, projectId, requestId);
   if ("error" in access) return access.error;
   const job = execution.getJob(projectId, parts[6]);
-  if (!job) return jsonResponse(404, { error: { code: "EXECUTION_NOT_FOUND", message: "Execution job not found", requestId } });
+  if (!job)
+    return jsonResponse(404, {
+      error: { code: "EXECUTION_NOT_FOUND", message: "Execution job not found", requestId },
+    });
   return jsonResponse(200, { job: execution.toPublicJob(job) }, { "x-correlation-id": requestId });
 }
 
@@ -1905,7 +2069,10 @@ async function handleExecutionStop({ request, store, execution, requestId, path 
   const access = requireProjectAccess(request, store, projectId, requestId);
   if ("error" in access) return access.error;
   const job = execution.stop(projectId, parts[6]);
-  if (!job) return jsonResponse(404, { error: { code: "EXECUTION_NOT_FOUND", message: "Execution job not found", requestId } });
+  if (!job)
+    return jsonResponse(404, {
+      error: { code: "EXECUTION_NOT_FOUND", message: "Execution job not found", requestId },
+    });
   return jsonResponse(200, { job: execution.toPublicJob(job) }, { "x-correlation-id": requestId });
 }
 
@@ -1915,7 +2082,14 @@ async function handleApplicationInstall({ request, store, applications, requestI
   if ("error" in access) return access.error;
   try {
     const job = await applications.install(projectId);
-    return jsonResponse(202, { job: applications.executionService.toPublicJob(job), network: "enabled-for-package-installation" }, { "x-correlation-id": requestId });
+    return jsonResponse(
+      202,
+      {
+        job: applications.executionService.toPublicJob(job),
+        network: "enabled-for-package-installation",
+      },
+      { "x-correlation-id": requestId },
+    );
   } catch (error) {
     return workspaceErrorResponse(error, requestId);
   }
@@ -1928,7 +2102,11 @@ async function handleApplicationBuild({ request, store, applications, requestId,
   try {
     const body = await parseJsonBody(request);
     const job = await applications.build(projectId, { command: body.command });
-    return jsonResponse(202, { job: applications.executionService.toPublicJob(job) }, { "x-correlation-id": requestId });
+    return jsonResponse(
+      202,
+      { job: applications.executionService.toPublicJob(job) },
+      { "x-correlation-id": requestId },
+    );
   } catch (error) {
     return workspaceErrorResponse(error, requestId);
   }
@@ -1938,7 +2116,11 @@ async function handlePreviewStatus({ request, store, applications, requestId, pa
   const projectId = workspaceProjectId(path);
   const access = requireProjectAccess(request, store, projectId, requestId);
   if ("error" in access) return access.error;
-  return jsonResponse(200, { preview: applications.getPreview(projectId) }, { "x-correlation-id": requestId });
+  return jsonResponse(
+    200,
+    { preview: applications.getPreview(projectId) },
+    { "x-correlation-id": requestId },
+  );
 }
 
 async function handlePreviewStart({ request, store, applications, requestId, path }) {
@@ -1947,8 +2129,15 @@ async function handlePreviewStart({ request, store, applications, requestId, pat
   if ("error" in access) return access.error;
   try {
     const body = await parseJsonBody(request);
-    const preview = await applications.startPreview(projectId, { command: body.command, directory: body.directory });
-    return jsonResponse(preview.status === "ready" ? 200 : 503, { preview: applications.toPublicPreview(preview) }, { "x-correlation-id": requestId });
+    const preview = await applications.startPreview(projectId, {
+      command: body.command,
+      directory: body.directory,
+    });
+    return jsonResponse(
+      preview.status === "ready" ? 200 : 503,
+      { preview: applications.toPublicPreview(preview) },
+      { "x-correlation-id": requestId },
+    );
   } catch (error) {
     return workspaceErrorResponse(error, requestId);
   }
@@ -1959,8 +2148,19 @@ async function handlePreviewStop({ request, store, applications, requestId, path
   const access = requireProjectAccess(request, store, projectId, requestId);
   if ("error" in access) return access.error;
   const preview = applications.stopPreview(projectId);
-  if (!preview) return jsonResponse(404, { error: { code: "PREVIEW_NOT_FOUND", message: "No preview exists for this project", requestId } });
-  return jsonResponse(200, { preview: applications.toPublicPreview(preview) }, { "x-correlation-id": requestId });
+  if (!preview)
+    return jsonResponse(404, {
+      error: {
+        code: "PREVIEW_NOT_FOUND",
+        message: "No preview exists for this project",
+        requestId,
+      },
+    });
+  return jsonResponse(
+    200,
+    { preview: applications.toPublicPreview(preview) },
+    { "x-correlation-id": requestId },
+  );
 }
 
 async function handlePreviewProxy({ request, store, applications, requestId, path }) {
@@ -1973,7 +2173,13 @@ async function handlePreviewProxy({ request, store, applications, requestId, pat
   const pathPreview = pathToken ? applications.authorize(projectId, pathToken) : null;
   let preview = queryToken ? applications.authorize(projectId, queryToken) : pathPreview;
   if ((queryToken || pathToken) && !preview && !bearerToken(request)) {
-    return jsonResponse(404, { error: { code: "PREVIEW_NOT_READY", message: "Preview is not running or the preview token is invalid", requestId } });
+    return jsonResponse(404, {
+      error: {
+        code: "PREVIEW_NOT_READY",
+        message: "Preview is not running or the preview token is invalid",
+        requestId,
+      },
+    });
   }
   if (!preview) {
     const access = requireProjectAccess(request, store, projectId, requestId);
@@ -1981,14 +2187,33 @@ async function handlePreviewProxy({ request, store, applications, requestId, pat
     const current = applications.getPreview(projectId);
     if (current?.status === "ready") preview = applications.previews.get(projectId);
   }
-  if (!preview) return jsonResponse(404, { error: { code: "PREVIEW_NOT_READY", message: "Preview is not running or the preview token is invalid", requestId } });
+  if (!preview)
+    return jsonResponse(404, {
+      error: {
+        code: "PREVIEW_NOT_READY",
+        message: "Preview is not running or the preview token is invalid",
+        requestId,
+      },
+    });
   return applications.proxy(preview, request);
 }
 
-async function handleExecutionStream({ request, store, execution, applications, repair, pipeline, requestId, path }) {
+async function handleExecutionStream({
+  request,
+  store,
+  execution,
+  applications,
+  repair,
+  pipeline,
+  requestId,
+  path,
+}) {
   const url = new URL(request.url);
   const token = url.searchParams.get("token") || bearerToken(request);
-  if (!token) return jsonResponse(401, { error: { code: "UNAUTHORIZED", message: "Missing token", requestId } });
+  if (!token)
+    return jsonResponse(401, {
+      error: { code: "UNAUTHORIZED", message: "Missing token", requestId },
+    });
   const projectId = workspaceProjectId(path);
   const authed = new Request(request.url, { headers: { authorization: `Bearer ${token}` } });
   const access = requireProjectAccess(authed, store, projectId, requestId);
@@ -2000,15 +2225,36 @@ async function handleExecutionStream({ request, store, execution, applications, 
       let closed = false;
       const write = (text) => {
         if (closed) return;
-        try { controller.enqueue(encoder.encode(text)); } catch { cleanup?.(); }
+        try {
+          controller.enqueue(encoder.encode(text));
+        } catch {
+          cleanup?.();
+        }
       };
-      const send = (event) => write(`id: ${event.id ?? randomUUID()}\ndata: ${JSON.stringify(event)}\n\n`);
+      const send = (event) =>
+        write(`id: ${event.id ?? randomUUID()}\ndata: ${JSON.stringify(event)}\n\n`);
       write("retry: 2000\n\n");
-      send({ type: "execution_snapshot", timestamp: new Date().toISOString(), projectId, payload: { jobs: execution.listJobs(projectId), preview: applications.getPreview(projectId) } });
-      const onExecution = (event) => { if (event.projectId === projectId) send(event); };
-      const onPreview = (event) => { if (event.projectId === projectId) send(event); };
-      const onRepair = (event) => { if (event.projectId === projectId) send(event); };
-      const onPipeline = (event) => { if (event.projectId === projectId) send(event); };
+      send({
+        type: "execution_snapshot",
+        timestamp: new Date().toISOString(),
+        projectId,
+        payload: {
+          jobs: execution.listJobs(projectId),
+          preview: applications.getPreview(projectId),
+        },
+      });
+      const onExecution = (event) => {
+        if (event.projectId === projectId) send(event);
+      };
+      const onPreview = (event) => {
+        if (event.projectId === projectId) send(event);
+      };
+      const onRepair = (event) => {
+        if (event.projectId === projectId) send(event);
+      };
+      const onPipeline = (event) => {
+        if (event.projectId === projectId) send(event);
+      };
       execution.on("event", onExecution);
       applications.on("event", onPreview);
       repair.on("event", onRepair);
@@ -2026,7 +2272,9 @@ async function handleExecutionStream({ request, store, execution, applications, 
       };
       request.signal.addEventListener("abort", cleanup, { once: true });
     },
-    cancel() { cleanup?.(); },
+    cancel() {
+      cleanup?.();
+    },
   });
   return new Response(stream, {
     status: 200,
@@ -2045,13 +2293,19 @@ async function handleWorkspaceRepair({ request, store, repair, requestId, path }
   if ("error" in access) return access.error;
   try {
     const body = await parseJsonBody(request);
-    const proposal = await repair.propose({ project: access.project, jobId: body.jobId, filePath: body.filePath ?? null });
+    const proposal = await repair.propose({
+      project: access.project,
+      jobId: body.jobId,
+      filePath: body.filePath ?? null,
+    });
     return jsonResponse(200, proposal, { "x-correlation-id": requestId });
   } catch (error) {
     const providerError = RepairService.providerErrorResponse(error, requestId);
     if (providerError) return jsonResponse(providerError.status, providerError.body);
     if (error.status === 404) {
-      return jsonResponse(404, { error: { code: "EXECUTION_NOT_FOUND", message: error.message, requestId } });
+      return jsonResponse(404, {
+        error: { code: "EXECUTION_NOT_FOUND", message: error.message, requestId },
+      });
     }
     return workspaceErrorResponse(error, requestId);
   }
@@ -2065,10 +2319,18 @@ async function handleRepairVerify({ request, store, repair, requestId, path }) {
     const body = await parseJsonBody(request);
     const files = Array.isArray(body.files) ? body.files : null;
     if (!files?.length) {
-      return jsonResponse(400, { error: { code: "NO_FILES", message: "Pass the reviewed files to apply", requestId } });
+      return jsonResponse(400, {
+        error: { code: "NO_FILES", message: "Pass the reviewed files to apply", requestId },
+      });
     }
     if (!Array.isArray(body.command) || !body.command.length || body.command.length > 64) {
-      return jsonResponse(400, { error: { code: "INVALID_COMMAND", message: "Pass the command array to rerun for verification", requestId } });
+      return jsonResponse(400, {
+        error: {
+          code: "INVALID_COMMAND",
+          message: "Pass the command array to rerun for verification",
+          requestId,
+        },
+      });
     }
     const verification = await repair.applyAndVerify({
       project: access.project,
@@ -2083,7 +2345,9 @@ async function handleRepairVerify({ request, store, repair, requestId, path }) {
     const providerError = RepairService.providerErrorResponse(error, requestId);
     if (providerError) return jsonResponse(providerError.status, providerError.body);
     if (error.status === 400 || error.status === 404) {
-      return jsonResponse(error.status, { error: { code: "REPAIR_INVALID", message: error.message, requestId } });
+      return jsonResponse(error.status, {
+        error: { code: "REPAIR_INVALID", message: error.message, requestId },
+      });
     }
     return workspaceErrorResponse(error, requestId);
   }
@@ -2098,7 +2362,11 @@ async function handleProjectContext({ request, store, workspace, execution, requ
     executionService: execution,
     project: access.project,
   });
-  return jsonResponse(200, { ...context, promptDigest: formatProjectContextForPrompt(context) }, { "x-correlation-id": requestId });
+  return jsonResponse(
+    200,
+    { ...context, promptDigest: formatProjectContextForPrompt(context) },
+    { "x-correlation-id": requestId },
+  );
 }
 
 async function handlePipelineRun({ request, store, pipeline, requestId, path }) {
@@ -2117,7 +2385,9 @@ async function handlePipelineRun({ request, store, pipeline, requestId, path }) 
     return jsonResponse(202, { run }, { "x-correlation-id": requestId });
   } catch (error) {
     if (error.status === 409) {
-      return jsonResponse(409, { error: { code: "PIPELINE_ALREADY_RUNNING", message: error.message, requestId } });
+      return jsonResponse(409, {
+        error: { code: "PIPELINE_ALREADY_RUNNING", message: error.message, requestId },
+      });
     }
     return workspaceErrorResponse(error, requestId);
   }
@@ -2127,7 +2397,11 @@ async function handlePipelineList({ request, store, pipeline, requestId, path })
   const projectId = workspaceProjectId(path);
   const access = requireProjectAccess(request, store, projectId, requestId);
   if ("error" in access) return access.error;
-  return jsonResponse(200, { runs: pipeline.listRuns(projectId) }, { "x-correlation-id": requestId });
+  return jsonResponse(
+    200,
+    { runs: pipeline.listRuns(projectId) },
+    { "x-correlation-id": requestId },
+  );
 }
 
 async function handlePipelineGet({ request, store, pipeline, requestId, path }) {
@@ -2136,7 +2410,10 @@ async function handlePipelineGet({ request, store, pipeline, requestId, path }) 
   const access = requireProjectAccess(request, store, projectId, requestId);
   if ("error" in access) return access.error;
   const run = pipeline.getRun(projectId, parts[7]);
-  if (!run) return jsonResponse(404, { error: { code: "PIPELINE_RUN_NOT_FOUND", message: "Autonomous run not found", requestId } });
+  if (!run)
+    return jsonResponse(404, {
+      error: { code: "PIPELINE_RUN_NOT_FOUND", message: "Autonomous run not found", requestId },
+    });
   return jsonResponse(200, { run }, { "x-correlation-id": requestId });
 }
 
@@ -2150,21 +2427,53 @@ async function handleWorkspaceDebug({ request, store, workspace, execution, ai, 
     for (const file of workspace.list(projectId)) {
       const artifact = workspace.read(projectId, file.path);
       if (file.path.endsWith(".json")) {
-        try { JSON.parse(artifact.content); } catch (error) { findings.push({ rule: "INVALID_JSON", severity: "High", file: file.path, message: error.message }); }
+        try {
+          JSON.parse(artifact.content);
+        } catch (error) {
+          findings.push({
+            rule: "INVALID_JSON",
+            severity: "High",
+            file: file.path,
+            message: error.message,
+          });
+        }
       }
-      const report = await ai.toolRegistry.executeTool(AGENT_ROLES.SECURITY_ENGINEER, "security_analyzer", { code: artifact.content, filePath: file.path });
+      const report = await ai.toolRegistry.executeTool(
+        AGENT_ROLES.SECURITY_ENGINEER,
+        "security_analyzer",
+        { code: artifact.content, filePath: file.path },
+      );
       findings.push(...report.findings);
     }
     let runtime = null;
-    if (body.command) runtime = await execution.execute(projectId, { command: body.command, timeoutMs: body.timeoutMs });
+    if (body.command)
+      runtime = await execution.execute(projectId, {
+        command: body.command,
+        timeoutMs: body.timeoutMs,
+      });
     const output = `${runtime?.stdout ?? ""}\n${runtime?.stderr ?? ""}`;
     const recommendations = [];
-    if (/Cannot find module|ERR_MODULE_NOT_FOUND/.test(output)) recommendations.push("Install or declare the missing dependency, then rerun the command.");
-    if (/SyntaxError|Unexpected token/.test(output)) recommendations.push("Inspect the syntax error location shown in the runtime output.");
-    if (findings.some((finding) => finding.rule === "HARDCODED_SECRET")) recommendations.push("Move hardcoded credentials into server-side environment variables and rotate exposed values.");
-    if (findings.some((finding) => finding.rule === "UNSAFE_EVAL")) recommendations.push("Replace dynamic eval/Function execution with explicit, validated logic.");
-    if (runtime?.timedOut) recommendations.push("Check for hanging handles or increase the bounded timeout only after inspecting the command.");
-    return jsonResponse(200, { findings, runtime, recommendations, analysis: "deterministic-static-and-runtime" }, { "x-correlation-id": requestId });
+    if (/Cannot find module|ERR_MODULE_NOT_FOUND/.test(output))
+      recommendations.push("Install or declare the missing dependency, then rerun the command.");
+    if (/SyntaxError|Unexpected token/.test(output))
+      recommendations.push("Inspect the syntax error location shown in the runtime output.");
+    if (findings.some((finding) => finding.rule === "HARDCODED_SECRET"))
+      recommendations.push(
+        "Move hardcoded credentials into server-side environment variables and rotate exposed values.",
+      );
+    if (findings.some((finding) => finding.rule === "UNSAFE_EVAL"))
+      recommendations.push(
+        "Replace dynamic eval/Function execution with explicit, validated logic.",
+      );
+    if (runtime?.timedOut)
+      recommendations.push(
+        "Check for hanging handles or increase the bounded timeout only after inspecting the command.",
+      );
+    return jsonResponse(
+      200,
+      { findings, runtime, recommendations, analysis: "deterministic-static-and-runtime" },
+      { "x-correlation-id": requestId },
+    );
   } catch (error) {
     return workspaceErrorResponse(error, requestId);
   }
@@ -2174,15 +2483,28 @@ async function handleTaskflowList({ request, store, taskflow, requestId, path })
   const projectId = workspaceProjectId(path);
   const access = requireProjectAccess(request, store, projectId, requestId);
   if ("error" in access) return access.error;
-  return jsonResponse(200, { plans: taskflow.getForProject(projectId) }, { "x-correlation-id": requestId });
+  return jsonResponse(
+    200,
+    { plans: taskflow.getForProject(projectId) },
+    { "x-correlation-id": requestId },
+  );
 }
 
-async function handleTaskflowCreate({ request, store, taskflow, persistTaskflow, requestId, path }) {
+async function handleTaskflowCreate({
+  request,
+  store,
+  taskflow,
+  persistTaskflow,
+  requestId,
+  path,
+}) {
   const projectId = workspaceProjectId(path);
   const access = requireProjectAccess(request, store, projectId, requestId);
   if ("error" in access) return access.error;
   try {
-    const plan = taskflow.create(projectId, await parseJsonBody(request), { persist: persistTaskflow });
+    const plan = taskflow.create(projectId, await parseJsonBody(request), {
+      persist: persistTaskflow,
+    });
     return jsonResponse(201, plan, { "x-correlation-id": requestId });
   } catch (error) {
     return workspaceErrorResponse(error, requestId);
@@ -2195,7 +2517,10 @@ async function handleTaskflowRun({ request, store, taskflow, persistTaskflow, re
   const planId = parts[6];
   const access = requireProjectAccess(request, store, projectId, requestId);
   if ("error" in access) return access.error;
-  if (!taskflow.getOwned(projectId, planId)) return jsonResponse(404, { error: { code: "TASKFLOW_NOT_FOUND", message: "TASKFLOW plan not found", requestId } });
+  if (!taskflow.getOwned(projectId, planId))
+    return jsonResponse(404, {
+      error: { code: "TASKFLOW_NOT_FOUND", message: "TASKFLOW plan not found", requestId },
+    });
   try {
     const plan = await taskflow.run(planId, { persist: persistTaskflow });
     return jsonResponse(200, plan, { "x-correlation-id": requestId });

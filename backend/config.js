@@ -7,6 +7,9 @@ export function loadConfig(env = process.env) {
     appName: env.APP_NAME ?? "HELIX",
     appPort: Number.isFinite(appPortValue) && appPortValue > 0 ? appPortValue : 3001,
     jwtSecret: env.JWT_SECRET ?? "development-secret-change-me",
+    logLevel: ["debug", "info", "warn", "error"].includes(env.HELIX_LOG_LEVEL)
+      ? env.HELIX_LOG_LEVEL
+      : "info",
     storagePath: env.HELIX_STORAGE_PATH ?? ".data/helix-state.json",
     workspaceRoot: env.HELIX_WORKSPACE_ROOT ?? ".data/workspaces",
     databaseUrl,

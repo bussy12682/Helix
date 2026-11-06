@@ -32,7 +32,10 @@ export async function provisionDatabase(baseUrl) {
         await drop.connect();
         // Belt and braces: terminate any leaked backends before dropping.
         await drop
-          .query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", [name])
+          .query(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
+            [name],
+          )
           .catch(() => {});
         await drop.query(`DROP DATABASE ${name} WITH (FORCE)`).catch(async (error) => {
           if (error.code === "42601") {

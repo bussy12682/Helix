@@ -25,7 +25,15 @@ const MAX_APPROVAL_ROUNDS = 6;
 const STEP_TIMEOUT_MS = 300000;
 
 export class AutonomousPipeline extends EventEmitter {
-  constructor({ ai, workspaceService, executionService, applicationService, repairService, saveRun }) {
+  constructor({
+    ai,
+    workspaceService,
+    executionService,
+    applicationService,
+    repairService,
+    saveRun,
+    persistence = null,
+  }) {
     super();
     this.setMaxListeners(0);
     this.ai = ai;
@@ -34,8 +42,43 @@ export class AutonomousPipeline extends EventEmitter {
     this.applicationService = applicationService;
     this.repairService = repairService;
     this.saveRun = saveRun;
+    // Optional durable-record adapter: { saveRunRecord, deleteRunRecord }.
+    this.persistence = persistence;
     this.runs = new Map();
     this.activeRuns = new Map();
+  }
+
+  /**
+   * Loads durable run records from a previous process life so run history and
+   * step details remain queryable across restarts.
+   */
+  hydrateRuns(records = []) {
+    for (const record of records) {
+      if (!record?.id || this.runs.has(record.id)) continue;
+      this.runs.set(record.id, {
+        ...record,
+        steps: record.steps?.map((step) => ({ ...step })) ?? [],
+      });
+    }
+    return this.runs.size;
+  }
+
+  /**
+   * Finalizes runs that were still running when the previous process died.
+   * Resuming half-finished pipelines automatically would repeat side effects,
+   * so the honest outcome is "interrupted" with a pointer to restart manually.
+   */
+  recoverInterrupted() {
+    let interrupted = 0;
+    for (const run of this.runs.values()) {
+      if (run.status !== "running") continue;
+      run.status = "interrupted";
+      run.error = "interrupted by backend restart";
+      run.finishedAt = new Date().toISOString();
+      this.persistRun(run);
+      interrupted += 1;
+    }
+    return interrupted;
   }
 
   emitPipeline(type, run, extra = {}) {
@@ -82,10 +125,9 @@ export class AutonomousPipeline extends EventEmitter {
       (run) => run.projectId === project.id && run.status === "running",
     );
     if (existing) {
-      throw Object.assign(
-        new Error("An autonomous run is already in progress for this project"),
-        { status: 409 },
-      );
+      throw Object.assign(new Error("An autonomous run is already in progress for this project"), {
+        status: 409,
+      });
     }
     const run = {
       id: `run_${randomUUID()}`,
@@ -102,6 +144,7 @@ export class AutonomousPipeline extends EventEmitter {
       },
     };
     this.runs.set(run.id, run);
+    this.trimRuns(run.projectId);
     const execution = this.executeRun(run, project).catch((error) => {
       run.status = "failed";
       run.error = error.message;
@@ -109,27 +152,69 @@ export class AutonomousPipeline extends EventEmitter {
       this.emitPipeline("pipeline_failed", run, { error: error.message });
       this.persistRun(run);
     });
-    this.activeRuns.set(run.id, execution.finally(() => this.activeRuns.delete(run.id)));
+    this.activeRuns.set(
+      run.id,
+      execution.finally(() => this.activeRuns.delete(run.id)),
+    );
+    this.persistRun(run);
     this.emitPipeline("pipeline_started", run);
     return this.toPublicRun(run);
   }
 
-  persistRun(run) {
-    if (!this.saveRun) return;
-    this.saveRun(run.projectId, {
-      id: run.id,
-      status: run.status,
-      startedAt: run.startedAt,
-      finishedAt: run.finishedAt ?? null,
-      error: run.error ?? null,
+  /** Keeps the newest MAX_RUNS_PER_PROJECT finished runs per project (live map + durable records). */
+  trimRuns(projectId) {
+    const history = [...this.runs.values()]
+      .filter((candidate) => candidate.projectId === projectId && candidate.status !== "running")
+      .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+    for (const stale of history.slice(
+      0,
+      Math.max(0, history.length - (MAX_RUNS_PER_PROJECT - 1)),
+    )) {
+      this.runs.delete(stale.id);
+      this.persistence?.deleteRunRecord?.(stale.id);
+    }
+  }
+
+  toDurableRun(run) {
+    return {
+      ...this.toPublicRun(run),
+      options: { ...run.options },
       steps: run.steps.map((step) => ({
         kind: step.kind,
         title: step.title,
         status: step.status,
+        startedAt: step.startedAt ?? null,
+        finishedAt: step.finishedAt ?? null,
         verified: step.verified ?? null,
         jobId: step.jobId ?? null,
+        detail: step.detail ?? null,
+        error: step.error ?? null,
+        repairRounds: step.repairRounds ?? null,
       })),
-    });
+    };
+  }
+
+  persistRun(run) {
+    if (this.saveRun)
+      this.saveRun(run.projectId, {
+        id: run.id,
+        status: run.status,
+        startedAt: run.startedAt,
+        finishedAt: run.finishedAt ?? null,
+        error: run.error ?? null,
+        steps: run.steps.map((step) => ({
+          kind: step.kind,
+          title: step.title,
+          status: step.status,
+          verified: step.verified ?? null,
+          jobId: step.jobId ?? null,
+        })),
+      });
+    try {
+      this.persistence?.saveRunRecord?.(this.toDurableRun(run));
+    } catch {
+      // Durability must never break the live pipeline; the next transition retries.
+    }
   }
 
   beginStep(run, kind, title) {
@@ -147,6 +232,8 @@ export class AutonomousPipeline extends EventEmitter {
     if (detail) step.detail = detail;
     if (error) step.error = error;
     this.emitPipeline("pipeline_step", run, { step });
+    // Step transitions are durable so a mid-run crash leaves an honest trail.
+    this.persistRun(run);
   }
 
   /** Waits for a started job, bounded by STEP_TIMEOUT_MS. */
@@ -170,7 +257,11 @@ export class AutonomousPipeline extends EventEmitter {
    * (recorded on the checkpoint decision) until the workflow completes.
    */
   async runGeneration(run, project) {
-    const step = this.beginStep(run, "generate", "Nine-agent generation through the orchestration DAG");
+    const step = this.beginStep(
+      run,
+      "generate",
+      "Nine-agent generation through the orchestration DAG",
+    );
     let workflow;
     try {
       workflow = await this.ai.orchestrator.createWorkflow(project.id, {
@@ -185,10 +276,7 @@ export class AutonomousPipeline extends EventEmitter {
     }
     workflow = await this.ai.orchestrator.runNextSteps(workflow.id);
     let rounds = 0;
-    while (
-      workflow.status === WORKFLOW_STATUS.AWAITING_APPROVAL &&
-      rounds < MAX_APPROVAL_ROUNDS
-    ) {
+    while (workflow.status === WORKFLOW_STATUS.AWAITING_APPROVAL && rounds < MAX_APPROVAL_ROUNDS) {
       rounds += 1;
       workflow = await this.ai.orchestrator.approveCheckpoint(
         workflow.id,
@@ -231,7 +319,11 @@ export class AutonomousPipeline extends EventEmitter {
     }
 
     // 2. Materialize artifacts to the real workspace.
-    const materializeStep = this.beginStep(run, "materialize", "Write artifacts to the sandbox workspace");
+    const materializeStep = this.beginStep(
+      run,
+      "materialize",
+      "Write artifacts to the sandbox workspace",
+    );
     try {
       const root = await this.workspaceService.materialize(project.id);
       const files = this.workspaceService.list(project.id);
@@ -250,17 +342,29 @@ export class AutonomousPipeline extends EventEmitter {
     const buildCommand = packageJson?.scripts?.build ? ["npm", "run", "build"] : null;
 
     if (run.options.install && packageJson) {
-      const step = this.beginStep(run, "install", "Install dependencies (network enabled for this job)");
+      const step = this.beginStep(
+        run,
+        "install",
+        "Install dependencies (network enabled for this job)",
+      );
       try {
         const job = await this.applicationService.install(project.id);
         const { result } = await this.awaitJob(job);
         this.finishStep(run, step, {
           status: job.status === "completed" ? "completed" : "failed",
           jobId: job.id,
-          detail: { exitCode: result.exitCode ?? null, stderr: String(result.stderr ?? "").slice(-500) },
+          detail: {
+            exitCode: result.exitCode ?? null,
+            stderr: String(result.stderr ?? "").slice(-500),
+          },
         });
         if (job.status !== "completed") {
-          await this.repairStep(run, project, ["npm", "install", "--no-audit", "--no-fund"], "install");
+          await this.repairStep(
+            run,
+            project,
+            ["npm", "install", "--no-audit", "--no-fund"],
+            "install",
+          );
         }
       } catch (error) {
         this.finishStep(run, step, { status: "failed", error: error.message });
@@ -280,7 +384,10 @@ export class AutonomousPipeline extends EventEmitter {
       this.finishStep(run, step, {
         status: job.status === "completed" ? "completed" : "failed",
         jobId: job.id,
-        detail: { exitCode: result.exitCode ?? null, stdout: String(result.stdout ?? "").slice(-500) },
+        detail: {
+          exitCode: result.exitCode ?? null,
+          stdout: String(result.stdout ?? "").slice(-500),
+        },
       });
       if (job.status !== "completed") {
         await this.repairStep(run, project, testCommand, "test");
@@ -323,7 +430,10 @@ export class AutonomousPipeline extends EventEmitter {
       .listJobs(project.id)
       .find((job) => job.kind === kind && job.status === "failed");
     if (!failedJob) {
-      this.finishStep(run, step, { status: "failed", error: "No failing job captured to diagnose" });
+      this.finishStep(run, step, {
+        status: "failed",
+        error: "No failing job captured to diagnose",
+      });
       return;
     }
     try {

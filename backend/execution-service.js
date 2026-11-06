@@ -9,6 +9,45 @@ const OUTPUT_LIMIT = 1024 * 1024;
 const JOB_LIMIT_PER_PROJECT = 100;
 const ACTIVE_JOB_LIMIT_PER_PROJECT = 25;
 const SAFE_ENV_KEYS = new Set(["HOST", "PORT", "NODE_ENV", "npm_config_cache"]);
+const DURABLE_OUTPUT_LIMIT = 64 * 1024;
+
+/**
+ * Bounded snapshot persisted on every job transition. Live jobs may buffer up
+ * to 1 MiB of output each; the durable record keeps the tail so restart
+ * recovery and post-mortem debugging stay cheap without unbounded growth.
+ */
+export function toDurableJob(job) {
+  const tail = (text) =>
+    typeof text === "string" && text.length > DURABLE_OUTPUT_LIMIT
+      ? text.slice(-DURABLE_OUTPUT_LIMIT)
+      : (text ?? "");
+  const result = job.result
+    ? {
+        ...job.result,
+        stdout: tail(job.result.stdout),
+        stderr: tail(job.result.stderr),
+      }
+    : null;
+  return {
+    id: job.id,
+    projectId: job.projectId,
+    kind: job.kind,
+    command: [...job.command],
+    timeoutMs: job.timeoutMs,
+    testSuiteName: job.testSuiteName ?? null,
+    allowNetwork: Boolean(job.allowNetwork),
+    env: { ...job.env },
+    status: job.status,
+    createdAt: job.createdAt,
+    startedAt: job.startedAt ?? null,
+    completedAt: job.completedAt ?? null,
+    stopRequested: Boolean(job.stopRequested),
+    outputTruncated: Boolean(job.outputTruncated),
+    stdout: tail(job.stdout),
+    stderr: tail(job.stderr),
+    result,
+  };
+}
 
 export function parseCommand(command) {
   if (Array.isArray(command)) {
@@ -77,6 +116,7 @@ export class ExecutionService extends EventEmitter {
     bwrapPath = "bwrap",
     prlimitPath = "/usr/bin/prlimit",
     maxConcurrent = 2,
+    persistence = null,
   } = {}) {
     super();
     this.setMaxListeners(0);
@@ -84,11 +124,72 @@ export class ExecutionService extends EventEmitter {
     this.bwrapPath = bwrapPath;
     this.prlimitPath = prlimitPath;
     this.maxConcurrent = Math.max(1, Math.min(8, Number(maxConcurrent) || 2));
+    // Optional durable-record adapter: { saveJob, deleteJob }. When wired,
+    // every job transition is written through so restarts can recover.
+    this.persistence = persistence;
     this.active = 0;
     this.queues = new Map();
     this.children = new Map();
     this.jobs = new Map();
     this.availability = null;
+  }
+
+  persistJob(job) {
+    if (!this.persistence?.saveJob) return;
+    try {
+      this.persistence.saveJob(toDurableJob(job));
+    } catch {
+      // Durability must never break the live execution path; the next
+      // transition retries and store status surfaces persistent failures.
+    }
+  }
+
+  /**
+   * Loads durable job records (from a previous process life) into the live
+   * registry so history is queryable across restarts. Records are restored
+   * WITHOUT their process handles — interrupted work is finalized by
+   * recoverInterrupted().
+   */
+  hydrateJobs(records = []) {
+    for (const record of records) {
+      if (!record?.id || this.jobs.has(record.id)) continue;
+      const job = {
+        ...record,
+        command: [...record.command],
+        stdout: record.stdout ?? "",
+        stderr: record.stderr ?? "",
+        completion: Promise.resolve(
+          record.result ?? { executed: false, status: "RESTORED", command: record.command },
+        ),
+      };
+      this.jobs.set(job.id, job);
+    }
+    return this.jobs.size;
+  }
+
+  /**
+   * Finalizes jobs that were queued/running when the previous process died.
+   * Their child processes no longer exist, so the honest outcome is
+   * "interrupted" — never silently resurrected or left running forever.
+   */
+  recoverInterrupted() {
+    let interrupted = 0;
+    for (const job of this.jobs.values()) {
+      if (job.completedAt) continue;
+      job.status = "interrupted";
+      job.completedAt = new Date().toISOString();
+      job.result = {
+        executed: false,
+        status: "INTERRUPTED",
+        command: job.command,
+        error: "interrupted by backend restart",
+        stdout: job.stdout,
+        stderr: job.stderr,
+      };
+      this.persistJob(job);
+      interrupted += 1;
+    }
+    return interrupted;
   }
 
   async getStatus() {
@@ -100,13 +201,7 @@ export class ExecutionService extends EventEmitter {
           reason: "prlimit is required for secure execution",
         };
       }
-      const probeArgs = [
-        "--unshare-all",
-        "--die-with-parent",
-        "--ro-bind",
-        "/usr",
-        "/usr",
-      ];
+      const probeArgs = ["--unshare-all", "--die-with-parent", "--ro-bind", "/usr", "/usr"];
       if (await exists("/lib")) probeArgs.push("--symlink", "usr/lib", "/lib");
       if (await exists("/lib64")) probeArgs.push("--symlink", "usr/lib64", "/lib64");
       probeArgs.push("--", "/usr/bin/true");
@@ -208,7 +303,9 @@ export class ExecutionService extends EventEmitter {
       (candidate) => candidate.projectId === projectId && !candidate.completedAt,
     ).length;
     if (activeForProject >= ACTIVE_JOB_LIMIT_PER_PROJECT) {
-      throw new Error(`A maximum of ${ACTIVE_JOB_LIMIT_PER_PROJECT} active execution jobs is allowed per project`);
+      throw new Error(
+        `A maximum of ${ACTIVE_JOB_LIMIT_PER_PROJECT} active execution jobs is allowed per project`,
+      );
     }
     const job = {
       id: `exec_${randomUUID()}`,
@@ -232,8 +329,12 @@ export class ExecutionService extends EventEmitter {
       .filter((candidate) => candidate.projectId === projectId)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     for (const stale of projectJobs.slice(JOB_LIMIT_PER_PROJECT)) {
-      if (stale.completedAt) this.jobs.delete(stale.id);
+      if (stale.completedAt) {
+        this.jobs.delete(stale.id);
+        this.persistence?.deleteJob?.(stale.id);
+      }
     }
+    this.persistJob(job);
 
     job.completion = bypassQueue
       ? Promise.resolve().then(() => this.runJob(job))
@@ -268,6 +369,7 @@ export class ExecutionService extends EventEmitter {
     this.active += 1;
     job.status = "running";
     job.startedAt = new Date().toISOString();
+    this.persistJob(job);
     this.emitJob("execution_started", job);
     try {
       const result = await this.executeIsolated(job);
@@ -308,6 +410,7 @@ export class ExecutionService extends EventEmitter {
           ? "completed"
           : "failed";
     this.children.delete(job.id);
+    this.persistJob(job);
     this.emitJob("execution_completed", job);
     return result;
   }
@@ -318,10 +421,11 @@ export class ExecutionService extends EventEmitter {
     if (job.completedAt) return job;
     job.stopRequested = true;
     job.status = "stopping";
+    this.persistJob(job);
     this.emitJob("execution_stopping", job);
     const child = this.children.get(job.id);
     if (child) this.killChild(child);
-    else if (!job.startedAt) return this.finishJob(job, this.stoppedResult(job)), job;
+    else if (!job.startedAt) return (this.finishJob(job, this.stoppedResult(job)), job);
     return job;
   }
 
@@ -357,13 +461,7 @@ export class ExecutionService extends EventEmitter {
       };
     }
     const root = await this.workspaceService.materialize(job.projectId);
-    const bwrapArgs = [
-      "--unshare-all",
-      "--die-with-parent",
-      "--new-session",
-      "--cap-drop",
-      "ALL",
-    ];
+    const bwrapArgs = ["--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL"];
     if (job.allowNetwork) bwrapArgs.push("--share-net");
     bwrapArgs.push(
       "--ro-bind",
@@ -391,7 +489,8 @@ export class ExecutionService extends EventEmitter {
       PATH: "/usr/local/bin:/usr/bin:/bin",
       npm_config_cache: "/tmp/npm-cache",
       CI: "true",
-      NODE_ENV: job.kind === "build" ? "production" : job.kind === "preview" ? "development" : "test",
+      NODE_ENV:
+        job.kind === "build" ? "production" : job.kind === "preview" ? "development" : "test",
       NODE_OPTIONS: "--max-old-space-size=512",
       ...job.env,
     };

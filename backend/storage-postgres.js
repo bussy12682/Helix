@@ -58,12 +58,33 @@ function tableForKey(kind, key) {
     workspaces: "workspaces",
     traces: "traces",
     taskflows: "taskflows",
+    executionJobs: "execution_jobs",
+    pipelineRuns: "pipeline_runs",
   };
-  return { table: tables[kind], keyColumn: kind === "workspaces" ? "project_id" : kind === "traces" ? "workflow_id" : kind === "passwordResets" ? "token" : kind === "sessions" ? "token" : "id" , key };
+  const keyColumns = {
+    executionJobs: "id",
+    pipelineRuns: "id",
+  };
+  return {
+    table: tables[kind],
+    keyColumn:
+      keyColumns[kind] ??
+      (kind === "workspaces"
+        ? "project_id"
+        : kind === "traces"
+          ? "workflow_id"
+          : kind === "passwordResets"
+            ? "token"
+            : kind === "sessions"
+              ? "token"
+              : "id"),
+    key,
+  };
 }
 
 export function createPostgresStore({ connectionString, poolSize = 10, logger = console } = {}) {
-  if (!connectionString) throw new Error("createPostgresStore requires a PostgreSQL connection string");
+  if (!connectionString)
+    throw new Error("createPostgresStore requires a PostgreSQL connection string");
 
   const users = new Map();
   const sessions = new Map();
@@ -73,6 +94,8 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
   const workspaces = new Map();
   const traces = new Map();
   const taskflows = new Map();
+  const executionJobs = new Map();
+  const pipelineRuns = new Map();
 
   const dirty = new Map(); // `${kind}:${key}` -> { kind, key, action: "upsert" | "delete" }
   const state = {
@@ -92,8 +115,10 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
   function sslConfig() {
     const url = new URL(connectionString);
     const sslmode = url.searchParams.get("sslmode") ?? url.searchParams.get("ssl");
-    if (sslmode === "require" || sslmode === "prefer") return { ssl: { rejectUnauthorized: false } };
-    if (sslmode === "no-verify" || sslmode === "disable") return sslmode === "disable" ? {} : { ssl: { rejectUnauthorized: false } };
+    if (sslmode === "require" || sslmode === "prefer")
+      return { ssl: { rejectUnauthorized: false } };
+    if (sslmode === "no-verify" || sslmode === "disable")
+      return sslmode === "disable" ? {} : { ssl: { rejectUnauthorized: false } };
     return {};
   }
 
@@ -166,7 +191,11 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
       case "passwordResets":
         return {
           sql: "INSERT INTO password_resets (token, expires_at, doc) VALUES ($1, $2, $3::jsonb) ON CONFLICT (token) DO UPDATE SET doc = EXCLUDED.doc, expires_at = EXCLUDED.expires_at",
-          params: [value.token, value.expiresAt ?? new Date(Date.now() + 3600_000).toISOString(), JSON.stringify(value)],
+          params: [
+            value.token,
+            value.expiresAt ?? new Date(Date.now() + 3600_000).toISOString(),
+            JSON.stringify(value),
+          ],
         };
       case "workflows":
         return {
@@ -174,7 +203,8 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
           params: [value.id, value.projectId, JSON.stringify(value)],
         };
       case "workspaces": {
-        const artifacts = value.artifacts instanceof Map ? [...value.artifacts.values()] : (value.artifacts ?? []);
+        const artifacts =
+          value.artifacts instanceof Map ? [...value.artifacts.values()] : (value.artifacts ?? []);
         return {
           sql: "INSERT INTO workspaces (project_id, doc, updated_at) VALUES ($1, $2::jsonb, now()) ON CONFLICT (project_id) DO UPDATE SET doc = EXCLUDED.doc, updated_at = now()",
           params: [value.projectId, JSON.stringify({ ...value, artifacts })],
@@ -190,6 +220,23 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
           sql: "INSERT INTO taskflows (id, project_id, doc, updated_at) VALUES ($1, $2, $3::jsonb, now()) ON CONFLICT (id) DO UPDATE SET doc = EXCLUDED.doc, updated_at = now()",
           params: [value.id, value.projectId, JSON.stringify(value)],
         };
+      case "executionJobs":
+        return {
+          sql: "INSERT INTO execution_jobs (id, project_id, status, created_at, completed_at, doc, updated_at) VALUES ($1, $2, $3, $4, $5, $6::jsonb, now()) ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, completed_at = EXCLUDED.completed_at, doc = EXCLUDED.doc, updated_at = now()",
+          params: [
+            value.id,
+            value.projectId,
+            value.status,
+            value.createdAt,
+            value.completedAt ?? null,
+            JSON.stringify(value),
+          ],
+        };
+      case "pipelineRuns":
+        return {
+          sql: "INSERT INTO pipeline_runs (id, project_id, status, started_at, doc, updated_at) VALUES ($1, $2, $3, $4, $5::jsonb, now()) ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, doc = EXCLUDED.doc, updated_at = now()",
+          params: [value.id, value.projectId, value.status, value.startedAt, JSON.stringify(value)],
+        };
       default:
         throw new Error(`Unknown entity kind: ${kind}`);
     }
@@ -197,15 +244,28 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
 
   function valueFor(kind, key) {
     switch (kind) {
-      case "users": return users.get(key);
-      case "sessions": return sessions.get(key);
-      case "projects": return projects.get(key);
-      case "passwordResets": return passwordResets.get(key);
-      case "workflows": return workflows.get(key);
-      case "workspaces": return workspaces.get(key);
-      case "traces": return { workflowId: key, spans: traces.get(key) ?? [] };
-      case "taskflows": return taskflows.get(key);
-      default: return null;
+      case "users":
+        return users.get(key);
+      case "sessions":
+        return sessions.get(key);
+      case "projects":
+        return projects.get(key);
+      case "passwordResets":
+        return passwordResets.get(key);
+      case "workflows":
+        return workflows.get(key);
+      case "workspaces":
+        return workspaces.get(key);
+      case "traces":
+        return { workflowId: key, spans: traces.get(key) ?? [] };
+      case "taskflows":
+        return taskflows.get(key);
+      case "executionJobs":
+        return executionJobs.get(key);
+      case "pipelineRuns":
+        return pipelineRuns.get(key);
+      default:
+        return null;
     }
   }
 
@@ -239,7 +299,8 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
   }
 
   function persist() {
-    for (const [key, value] of users) dirty.set(`users:${key}`, { kind: "users", key, action: "upsert" });
+    for (const [key, value] of users)
+      dirty.set(`users:${key}`, { kind: "users", key, action: "upsert" });
     markAll();
     scheduleFlush(true);
   }
@@ -256,6 +317,8 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
     for (const [key] of workspaces) mark("workspaces", key);
     for (const [key] of traces) mark("traces", key);
     for (const [key] of taskflows) mark("taskflows", key);
+    for (const [key] of executionJobs) mark("executionJobs", key);
+    for (const [key] of pipelineRuns) mark("pipelineRuns", key);
   }
 
   function scheduleFlush(immediate = false) {
@@ -294,6 +357,8 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
       workspaceRows,
       traceRows,
       taskflowRows,
+      jobRows,
+      runRows,
     ] = await Promise.all([
       pool.query("SELECT doc FROM users"),
       pool.query("SELECT doc FROM sessions WHERE expires_at > now()"),
@@ -303,6 +368,8 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
       pool.query("SELECT doc FROM workspaces"),
       pool.query("SELECT workflow_id, spans FROM traces"),
       pool.query("SELECT doc FROM taskflows"),
+      pool.query("SELECT doc FROM execution_jobs"),
+      pool.query("SELECT doc FROM pipeline_runs"),
     ]);
     for (const row of userRows.rows) users.set(row.doc.id, row.doc);
     for (const row of sessionRows.rows) sessions.set(row.doc.token, row.doc);
@@ -311,10 +378,15 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
     for (const row of workflowRows.rows) workflows.set(row.doc.id, row.doc);
     for (const row of workspaceRows.rows) {
       const { artifacts = [], ...rest } = row.doc ?? {};
-      workspaces.set(row.doc.projectId, { ...rest, artifacts: new Map(artifacts.map((a) => [a.path, a])) });
+      workspaces.set(row.doc.projectId, {
+        ...rest,
+        artifacts: new Map(artifacts.map((a) => [a.path, a])),
+      });
     }
     for (const row of traceRows.rows) traces.set(row.workflow_id, row.spans ?? []);
     for (const row of taskflowRows.rows) taskflows.set(row.doc.id, row.doc);
+    for (const row of jobRows.rows) executionJobs.set(row.doc.id, row.doc);
+    for (const row of runRows.rows) pipelineRuns.set(row.doc.id, row.doc);
 
     // Boot hygiene: purge expired credentials outright.
     await pool.query("DELETE FROM sessions WHERE expires_at <= now()");
@@ -351,7 +423,9 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
   const ready = (async () => {
     try {
       const pg = await import("pg").catch(() => {
-        throw new Error("DATABASE_URL is configured but the 'pg' driver is not installed. Run `npm install pg`.");
+        throw new Error(
+          "DATABASE_URL is configured but the 'pg' driver is not installed. Run `npm install pg`.",
+        );
       });
       pool = new pg.Pool({
         connectionString,
@@ -360,7 +434,9 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
         connectionTimeoutMillis: 10_000,
         ...sslConfig(),
       });
-      pool.on("error", (error) => logger.error("[postgres-store] idle client error:", error.message));
+      pool.on("error", (error) =>
+        logger.error("[postgres-store] idle client error:", error.message),
+      );
       await acquireAdvisoryLock();
       await migrate();
       await hydrate();
@@ -376,7 +452,13 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
     return `${prefix}_${randomUUID()}`;
   }
 
-  function createUser({ name, email, passwordHash, emailVerified = false, authProvider = "password" }) {
+  function createUser({
+    name,
+    email,
+    passwordHash,
+    emailVerified = false,
+    authProvider = "password",
+  }) {
     const id = nextId("user");
     const user = {
       id,
@@ -395,7 +477,9 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
   }
 
   function getUserByEmail(email) {
-    const normalized = String(email ?? "").trim().toLowerCase();
+    const normalized = String(email ?? "")
+      .trim()
+      .toLowerCase();
     return [...users.values()].find((user) => user.email === normalized) ?? null;
   }
 
@@ -590,6 +674,46 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
     return [...taskflows.values()];
   }
 
+  function saveExecutionJob(job) {
+    executionJobs.set(job.id, job);
+    mark("executionJobs", job.id);
+    scheduleFlush(true);
+    return job;
+  }
+
+  function deleteExecutionJob(id) {
+    const deleted = executionJobs.delete(id);
+    if (deleted) {
+      mark("executionJobs", id, "delete");
+      scheduleFlush(true);
+    }
+    return deleted;
+  }
+
+  function listExecutionJobs() {
+    return [...executionJobs.values()];
+  }
+
+  function savePipelineRun(run) {
+    pipelineRuns.set(run.id, run);
+    mark("pipelineRuns", run.id);
+    scheduleFlush(true);
+    return run;
+  }
+
+  function deletePipelineRun(id) {
+    const deleted = pipelineRuns.delete(id);
+    if (deleted) {
+      mark("pipelineRuns", id, "delete");
+      scheduleFlush(true);
+    }
+    return deleted;
+  }
+
+  function listPipelineRuns() {
+    return [...pipelineRuns.values()];
+  }
+
   function listProjectsForUser(userId) {
     return [...projects.values()].filter((project) => project.ownerId === userId);
   }
@@ -663,7 +787,13 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
       flushedWrites: state.flushedWrites,
       lastWriteAt: state.lastWriteAt,
       lastWriteError: state.lastWriteError,
-      pool: pool ? { totalCount: pool.totalCount, idleCount: pool.idleCount, waitingCount: pool.waitingCount } : null,
+      pool: pool
+        ? {
+            totalCount: pool.totalCount,
+            idleCount: pool.idleCount,
+            waitingCount: pool.waitingCount,
+          }
+        : null,
     };
   }
 
@@ -678,6 +808,8 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
     workspaces,
     traces,
     taskflows,
+    executionJobs,
+    pipelineRuns,
     mode: "postgres",
     ready,
     nextId,
@@ -698,6 +830,12 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
     listTraces,
     saveTaskflow,
     listTaskflows,
+    saveExecutionJob,
+    deleteExecutionJob,
+    listExecutionJobs,
+    savePipelineRun,
+    deletePipelineRun,
+    listPipelineRuns,
     createUser,
     getUserByEmail,
     getUserById,

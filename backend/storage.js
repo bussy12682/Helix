@@ -11,6 +11,8 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
   const workspaces = new Map();
   const traces = new Map();
   const taskflows = new Map();
+  const executionJobs = new Map();
+  const pipelineRuns = new Map();
   let persistTimer = null;
 
   // Atomic write: serialize to a temp file then rename so a crash never leaves a truncated state file.
@@ -22,7 +24,7 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
     if (storagePath === ":memory:") return;
 
     const state = {
-      version: 3,
+      version: 4,
       users: [...users.values()],
       sessions: [...sessions.values()],
       projects: [...projects.values()],
@@ -31,6 +33,8 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
       workspaces: [...workspaces.values()],
       traces: [...traces.entries()].map(([workflowId, spans]) => ({ workflowId, spans })),
       taskflows: [...taskflows.values()],
+      executionJobs: [...executionJobs.values()],
+      pipelineRuns: [...pipelineRuns.values()],
     };
     mkdirSync(dirname(storagePath), { recursive: true });
     const tempPath = `${storagePath}.${process.pid}.tmp`;
@@ -68,6 +72,8 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
         workspaces.set(workspace.projectId, workspace);
       for (const entry of state.traces ?? []) traces.set(entry.workflowId, entry.spans ?? []);
       for (const plan of state.taskflows ?? []) taskflows.set(plan.id, plan);
+      for (const job of state.executionJobs ?? []) executionJobs.set(job.id, job);
+      for (const run of state.pipelineRuns ?? []) pipelineRuns.set(run.id, run);
     } catch (error) {
       console.error(
         `[storage] Could not read ${storagePath}; starting with an empty store.`,
@@ -276,6 +282,34 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
     return [...taskflows.values()].map((plan) => structuredClone(plan));
   }
 
+  /** Durable execution-job records: written on every job transition. */
+  function saveExecutionJob(job) {
+    executionJobs.set(job.id, structuredClone(job));
+    persistSoon();
+  }
+
+  function deleteExecutionJob(id) {
+    return executionJobs.delete(id);
+  }
+
+  function listExecutionJobs() {
+    return [...executionJobs.values()].map((job) => structuredClone(job));
+  }
+
+  /** Durable autonomous pipeline-run records: written on every run transition. */
+  function savePipelineRun(run) {
+    pipelineRuns.set(run.id, structuredClone(run));
+    persistSoon();
+  }
+
+  function deletePipelineRun(id) {
+    return pipelineRuns.delete(id);
+  }
+
+  function listPipelineRuns() {
+    return [...pipelineRuns.values()].map((run) => structuredClone(run));
+  }
+
   function listProjectsForUser(userId) {
     return [...projects.values()].filter((project) => project.ownerId === userId);
   }
@@ -343,6 +377,8 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
     projects,
     passwordResets,
     workflows,
+    executionJobs,
+    pipelineRuns,
     mode: storagePath === ":memory:" ? "memory" : "file",
     nextId,
     persist,
@@ -359,6 +395,12 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
     listTraces,
     saveTaskflow,
     listTaskflows,
+    saveExecutionJob,
+    deleteExecutionJob,
+    listExecutionJobs,
+    savePipelineRun,
+    deletePipelineRun,
+    listPipelineRuns,
     createUser,
     getUserByEmail,
     getUserById,
