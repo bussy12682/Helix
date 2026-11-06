@@ -319,6 +319,67 @@ function Settings() {
                   </dt>
                   <dd>{health.ai?.mockFallbackAllowed ? "allowed" : "disabled"}</dd>
                 </div>
+                {health.readiness ? (
+                  <>
+                    <div>
+                      <dt className="text-xs text-muted-foreground">Sandbox execution</dt>
+                      <dd>
+                        <StatusPill
+                          tone={health.readiness.execution.available === false ? "danger" : "done"}
+                        >
+                          {health.readiness.execution.available === null
+                            ? "unknown"
+                            : health.readiness.execution.available
+                              ? "available"
+                              : "unavailable"}
+                        </StatusPill>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-muted-foreground">Execution concurrency</dt>
+                      <dd>
+                        {health.readiness.execution.active ?? 0} active / max{" "}
+                        {health.readiness.execution.maxConcurrent ?? "?"} (
+                        {health.readiness.execution.trackedJobs ?? 0} tracked jobs)
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-muted-foreground">Storage health</dt>
+                      <dd>
+                        <StatusPill
+                          tone={
+                            health.readiness.storage.lastWriteError ||
+                            (health.readiness.storage.pendingWrites ?? 0) > 0
+                              ? "danger"
+                              : "done"
+                          }
+                        >
+                          {health.readiness.storage.lastWriteError ||
+                          (health.readiness.storage.pendingWrites ?? 0) > 0
+                            ? `degraded (${health.readiness.storage.pendingWrites ?? 0} pending writes)`
+                            : "healthy"}
+                        </StatusPill>
+                      </dd>
+                    </div>
+                    {health.readiness.recovery ? (
+                      <div>
+                        <dt className="text-xs text-muted-foreground">Boot recovery</dt>
+                        <dd>
+                          Last boot hydrated {health.readiness.recovery.hydratedExecutionJobs} job
+                          and {health.readiness.recovery.hydratedPipelineRuns} pipeline-run records
+                          {health.readiness.recovery.interruptedExecutionJobs +
+                            health.readiness.recovery.interruptedPipelineRuns >
+                          0
+                            ? ` and finalized ${
+                                health.readiness.recovery.interruptedExecutionJobs +
+                                health.readiness.recovery.interruptedPipelineRuns
+                              } interrupted items as such`
+                            : " with nothing left mid-flight"}
+                        </dd>
+                      </div>
+                    ) : null}
+                  </>
+                ) : null}
               </dl>
             )}
           </Panel>

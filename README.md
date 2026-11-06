@@ -84,21 +84,26 @@ backend/
 ## Quick Start
 
 ### 1. Prerequisites
+
 - **Node.js** (v20+ recommended)
 - **npm**
 
 ### 2. Install Dependencies
+
 ```sh
 npm install
 ```
 
 ### 3. Configure Environment
+
 Copy the example environment configuration:
+
 ```sh
 cp .env.example .env.local
 ```
 
 Key environment variables:
+
 ```env
 NODE_ENV=development
 APP_PORT=3001
@@ -116,12 +121,15 @@ AI_MODEL=gemini-2.5-flash
 ```
 
 ### 4. Run the Application Locally
+
 Start the backend API server:
+
 ```sh
 node backend/index.js
 ```
 
 In a separate terminal, start the frontend development server:
+
 ```sh
 npm run dev
 ```
@@ -136,11 +144,14 @@ HELIX includes an automated test and benchmark suite covering contracts, schemas
 
 ```sh
 npm test            # node --test backend/tests/*.test.js
+npm run test:ui     # vitest frontend suite (session transport, AppShell boot probe)
 npm run typecheck   # tsc --noEmit
 npm run build
+npm run verify:providers   # real completion call per configured AI provider
 ```
 
 ### Test Suite Highlights
+
 - `agent-contracts.test.js` — Validates contracts for all 9 specialized agents.
 - `ai.test.js` — Validates brief analysis, voice transcription, and rate-limiting fallbacks.
 - `benchmark-evaluation.test.js` — End-to-end multi-agent evaluation on an E-commerce platform.
@@ -160,6 +171,7 @@ npm run build
 ## API Summary
 
 ### Authentication
+
 - `POST /api/v1/auth/register` — Create user account with complexity validation
 - `POST /api/v1/auth/login` — Authenticate user and issue session token
 - `POST /api/v1/auth/demo` — 1-click demo login (disabled in production unless `HELIX_ENABLE_DEMO=true`)
@@ -171,6 +183,7 @@ npm run build
 - `POST /api/v1/auth/password-reset/complete` — Complete password reset
 
 ### Projects & Ingestion
+
 - `GET /api/v1/projects` — List workspace projects
 - `POST /api/v1/projects` — Create new project
 - `PATCH /api/v1/projects/:id` — Edit project brief (name, description, features, stack)
@@ -180,6 +193,7 @@ npm run build
 - `POST /api/v1/voice/turn` — Interactive voice briefing turn
 
 ### AI Workforce & Orchestration
+
 - `POST /api/v1/projects/:id/workflows` — Initialize and start 9-agent workflow
 - `GET /api/v1/projects/:id/workflows` — Retrieve current workflow state and task DAG
 - `GET /api/v1/projects/:id/office` — Retrieve live floor state for the 9 agents
@@ -203,4 +217,3 @@ Detailed technical documentation is available in [`docs/AI_ARCHITECTURE.md`](doc
 ## License
 
 Published under the MIT License.
-

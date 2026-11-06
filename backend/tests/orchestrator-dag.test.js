@@ -90,7 +90,7 @@ test('Approving checkpoints progresses workflow to completion', async () => {
   const artifacts = ai.contextManager.getArtifacts('proj_3');
   assert.ok(artifacts.length >= 7);
   assert.ok(artifacts.some((a) => a.name === 'README.md'));
-  assert.ok(artifacts.some((a) => a.name === 'schema.sql'));
+  assert.ok(artifacts.some((a) => a.path === 'database/README.md'));
   assert.ok(artifacts.some((a) => a.name === 'Dockerfile'));
 });
 

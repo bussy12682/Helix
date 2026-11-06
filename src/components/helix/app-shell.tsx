@@ -7,6 +7,7 @@ import {
   Rocket,
   Settings,
   Shield,
+  SquareTerminal,
   Users,
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
@@ -18,6 +19,7 @@ import { getCurrentUser, getStoredSessionToken, logout, type CurrentUser } from 
 const nav = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { to: "/projects", label: "Projects", icon: Boxes },
+  { to: "/projects/workspace", label: "Workspace", icon: SquareTerminal },
   { to: "/office", label: "AI Office", icon: Users },
   { to: "/office/tasks", label: "Activity", icon: Activity },
   { to: "/deployments", label: "Deployments", icon: Rocket },
@@ -41,6 +43,9 @@ export function AppShell({
 
   useEffect(() => {
     const token = getStoredSessionToken();
+    // In cookie-session mode this returns an opaque marker (the credential lives in an
+    // httpOnly cookie), so the probe below authenticates via the cookie; if it is absent
+    // or expired the server answers 401 and we fall through to the login redirect.
     if (!token) return;
     getCurrentUser(token)
       .then((res) => setUser(res.user))

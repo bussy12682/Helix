@@ -10,6 +10,11 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
   const workflows = new Map();
   const workspaces = new Map();
   const traces = new Map();
+  const taskflows = new Map();
+  const executionJobs = new Map();
+  const pipelineRuns = new Map();
+  const budgetUsage = new Map();
+  const auditEvents = new Map();
   let persistTimer = null;
 
   // Atomic write: serialize to a temp file then rename so a crash never leaves a truncated state file.
@@ -21,7 +26,7 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
     if (storagePath === ":memory:") return;
 
     const state = {
-      version: 2,
+      version: 4,
       users: [...users.values()],
       sessions: [...sessions.values()],
       projects: [...projects.values()],
@@ -29,6 +34,11 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
       workflows: [...workflows.values()],
       workspaces: [...workspaces.values()],
       traces: [...traces.entries()].map(([workflowId, spans]) => ({ workflowId, spans })),
+      taskflows: [...taskflows.values()],
+      executionJobs: [...executionJobs.values()],
+      pipelineRuns: [...pipelineRuns.values()],
+      budgetUsage: [...budgetUsage.values()],
+      auditEvents: [...auditEvents.values()].slice(-1000),
     };
     mkdirSync(dirname(storagePath), { recursive: true });
     const tempPath = `${storagePath}.${process.pid}.tmp`;
@@ -65,6 +75,12 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
       for (const workspace of state.workspaces ?? [])
         workspaces.set(workspace.projectId, workspace);
       for (const entry of state.traces ?? []) traces.set(entry.workflowId, entry.spans ?? []);
+      for (const plan of state.taskflows ?? []) taskflows.set(plan.id, plan);
+      for (const job of state.executionJobs ?? []) executionJobs.set(job.id, job);
+      for (const run of state.pipelineRuns ?? []) pipelineRuns.set(run.id, run);
+      for (const record of state.budgetUsage ?? [])
+        budgetUsage.set(record.key ?? record.scopeKey, record);
+      for (const event of state.auditEvents ?? []) auditEvents.set(event.id, event);
     } catch (error) {
       console.error(
         `[storage] Could not read ${storagePath}; starting with an empty store.`,
@@ -227,6 +243,7 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
         }
       }
       workspaces.delete(id);
+      for (const [planId, plan] of taskflows) if (plan.projectId === id) taskflows.delete(planId);
       persist();
     }
     return deleted;
@@ -261,6 +278,74 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
 
   function listTraces() {
     return [...traces.values()].flat();
+  }
+
+  function saveTaskflow(plan) {
+    taskflows.set(plan.id, structuredClone(plan));
+    persistSoon();
+  }
+
+  function listTaskflows() {
+    return [...taskflows.values()].map((plan) => structuredClone(plan));
+  }
+
+  /** Durable execution-job records: written on every job transition. */
+  function saveExecutionJob(job) {
+    executionJobs.set(job.id, structuredClone(job));
+    persistSoon();
+  }
+
+  function deleteExecutionJob(id) {
+    return executionJobs.delete(id);
+  }
+
+  function listExecutionJobs() {
+    return [...executionJobs.values()].map((job) => structuredClone(job));
+  }
+
+  /** Durable autonomous pipeline-run records: written on every run transition. */
+  function savePipelineRun(run) {
+    pipelineRuns.set(run.id, structuredClone(run));
+    persistSoon();
+  }
+
+  function deletePipelineRun(id) {
+    return pipelineRuns.delete(id);
+  }
+
+  function listPipelineRuns() {
+    return [...pipelineRuns.values()].map((run) => structuredClone(run));
+  }
+
+  function saveBudgetUsage(record) {
+    budgetUsage.set(record.key ?? record.scopeKey, structuredClone(record));
+    persistSoon();
+    return record;
+  }
+
+  function deleteBudgetUsage(key) {
+    return budgetUsage.delete(key);
+  }
+
+  function saveAuditEvent(event) {
+    auditEvents.set(event.id, structuredClone(event));
+    // Keep the persisted audit trail bounded; drop the oldest beyond 1000.
+    if (auditEvents.size > 1000) {
+      const ordered = [...auditEvents.values()].sort((a, b) =>
+        a.createdAt.localeCompare(b.createdAt),
+      );
+      for (const stale of ordered.slice(0, ordered.length - 1000)) auditEvents.delete(stale.id);
+    }
+    persistSoon();
+    return event;
+  }
+
+  function deleteAuditEvent(id) {
+    return auditEvents.delete(id);
+  }
+
+  function listAuditEvents() {
+    return [...auditEvents.values()].map((event) => structuredClone(event));
   }
 
   function listProjectsForUser(userId) {
@@ -330,6 +415,10 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
     projects,
     passwordResets,
     workflows,
+    executionJobs,
+    pipelineRuns,
+    budgetUsage,
+    auditEvents,
     mode: storagePath === ":memory:" ? "memory" : "file",
     nextId,
     persist,
@@ -344,6 +433,19 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
     listWorkspaces,
     saveTrace,
     listTraces,
+    saveTaskflow,
+    listTaskflows,
+    saveExecutionJob,
+    deleteExecutionJob,
+    listExecutionJobs,
+    savePipelineRun,
+    deletePipelineRun,
+    listPipelineRuns,
+    saveBudgetUsage,
+    deleteBudgetUsage,
+    saveAuditEvent,
+    deleteAuditEvent,
+    listAuditEvents,
     createUser,
     getUserByEmail,
     getUserById,

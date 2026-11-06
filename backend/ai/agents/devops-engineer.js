@@ -19,6 +19,7 @@ SPECIALIZED DEVOPS ENGINEER GUIDELINES:
 - Create docker-compose.yml configuration for local multi-service testing.
 - Design automated GitHub Actions CI/CD workflows for testing, linting, and build verification.
 - Provide environment variable templates (.env.example) and deployment checklists.
+- Make container and CI commands match the actual package.json scripts and generated entrypoint; do not reference deployment targets or credentials as though they exist.
 - Produce artifacts: "Dockerfile", "docker-compose.yml", and ".github/workflows/ci.yml".`;
   }
 }

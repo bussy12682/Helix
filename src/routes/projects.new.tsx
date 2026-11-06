@@ -246,7 +246,13 @@ function NewProject() {
         "helix_project_analysis",
         JSON.stringify({ ...analysis, name: name.trim(), description: projectDescription }),
       );
-      toast.success("Brief analyzed. Review your project summary.");
+      if (analysis.simulated) {
+        toast.warning("No live AI provider was used. Review the offline starter draft carefully.");
+      } else {
+        toast.success(
+          `Brief analyzed with ${analysis.provider ?? "AI"}. Review your project summary.`,
+        );
+      }
       navigate({ to: "/projects/summary" });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not create project.");

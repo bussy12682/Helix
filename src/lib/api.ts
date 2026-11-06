@@ -30,12 +30,30 @@ export type ApiResponse<T> = {
 const STORAGE_KEY = "helix_session";
 const DEFAULT_BASE_URL = "http://localhost:3001";
 
+/**
+ * Cookie-session mode (opt-in at build time with VITE_COOKIE_SESSIONS=true, paired with
+ * HELIX_COOKIE_SESSIONS=true on the backend). The session credential then lives in an
+ * httpOnly cookie the page cannot read: requests authenticate through
+ * `credentials: "include"` instead of an Authorization header, and no token is ever
+ * written to localStorage (nothing for a script injection to exfiltrate).
+ */
+export const COOKIE_SESSIONS = import.meta.env["VITE_COOKIE_SESSIONS"] === "true";
+
+/**
+ * Opaque marker returned by getStoredSessionToken() in cookie-session mode. It is never a
+ * secret — it only signals "the httpOnly cookie is the credential" so existing signed-in
+ * guards (`if (!token)`) keep working after a page reload, when no in-memory token exists.
+ * authHeaders() strips it before any request is sent; the server decides session validity.
+ */
+const COOKIE_SESSION_CREDENTIAL = "__helix_cookie_session__";
+
 function getBaseUrl() {
   return (import.meta.env["VITE_API_BASE_URL"] ?? DEFAULT_BASE_URL).replace(/\/$/, "");
 }
 
 export function getStoredSessionToken() {
   if (typeof window === "undefined") return null;
+  if (COOKIE_SESSIONS) return COOKIE_SESSION_CREDENTIAL;
 
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
@@ -50,6 +68,13 @@ export function getStoredSessionToken() {
 export function setStoredSessionToken(token: string | null) {
   if (typeof window === "undefined") return;
 
+  if (COOKIE_SESSIONS) {
+    // Cookie-session mode: never persist a session token client-side. Also wipe any
+    // legacy localStorage entry so switching modes cannot resurrect a stale token.
+    window.localStorage.removeItem(STORAGE_KEY);
+    return;
+  }
+
   if (!token) {
     window.localStorage.removeItem(STORAGE_KEY);
     return;
@@ -58,11 +83,20 @@ export function setStoredSessionToken(token: string | null) {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ token }));
 }
 
+/**
+ * Authorization header for a session credential. In cookie-session mode — or when no
+ * token is available — no Authorization header is sent; the httpOnly cookie attached by
+ * `credentials: "include"` authenticates the request instead.
+ */
+export const authHeaders = (token?: string | null): Record<string, string> =>
+  !COOKIE_SESSIONS && token ? { Authorization: `Bearer ${token}` } : {};
+
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const url = `${getBaseUrl()}${path}`;
   const isFormData = typeof FormData !== "undefined" && init.body instanceof FormData;
   const response = await fetch(url, {
     ...init,
+    credentials: COOKIE_SESSIONS ? "include" : "same-origin",
     headers: {
       ...(isFormData ? {} : { "content-type": "application/json" }),
       ...(init.headers ?? {}),
@@ -149,9 +183,7 @@ export async function createProject(
   }>("/api/v1/projects", {
     method: "POST",
     body: JSON.stringify(payload),
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
+    headers: authHeaders(token),
   });
 }
 
@@ -160,6 +192,9 @@ export type ProjectAnalysis = {
   description: string;
   keyFeatures: string[];
   techStack: string[];
+  provider?: string | undefined;
+  simulated?: boolean | undefined;
+  warning?: string | undefined;
 };
 
 export async function analyzeProject(
@@ -173,7 +208,7 @@ export async function analyzeProject(
   return apiRequest<ProjectAnalysis>("/api/v1/projects/analyze", {
     method: "POST",
     body: JSON.stringify(payload),
-    headers: { Authorization: `Bearer ${token}` },
+    headers: authHeaders(token),
   });
 }
 
@@ -187,7 +222,7 @@ export async function sendVoiceTurn(
   return apiRequest<{ reply: string }>("/api/v1/voice/turn", {
     method: "POST",
     body: JSON.stringify(payload),
-    headers: { Authorization: `Bearer ${token}` },
+    headers: authHeaders(token),
   });
 }
 
@@ -198,7 +233,7 @@ export async function transcribeVoiceNote(file: Blob, token: string) {
   return apiRequest<{ transcript: string }>("/api/v1/voice/transcribe", {
     method: "POST",
     body: formData,
-    headers: { Authorization: `Bearer ${token}` },
+    headers: authHeaders(token),
   });
 }
 
@@ -211,7 +246,7 @@ export async function extractProjectDocument(file: File, token: string) {
     {
       method: "POST",
       body: formData,
-      headers: { Authorization: `Bearer ${token}` },
+      headers: authHeaders(token),
     },
   );
 }
@@ -219,7 +254,7 @@ export async function extractProjectDocument(file: File, token: string) {
 export async function deleteProject(projectId: string, token: string) {
   return apiRequest<{ message: string; id: string }>(`/api/v1/projects/${projectId}`, {
     method: "DELETE",
-    headers: { Authorization: `Bearer ${token}` },
+    headers: authHeaders(token),
   });
 }
 
@@ -236,9 +271,7 @@ export async function listProjects(token: string) {
     }>
   >("/api/v1/projects", {
     method: "GET",
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
+    headers: authHeaders(token),
   });
 }
 
@@ -262,7 +295,7 @@ export async function getDashboard(token: string) {
     };
   }>("/api/v1/dashboard", {
     method: "GET",
-    headers: { Authorization: `Bearer ${token}` },
+    headers: authHeaders(token),
   });
 }
 
@@ -275,7 +308,7 @@ export async function initiateGoogleOAuth() {
   window.localStorage.setItem("google_oauth_state", state);
 
   const params = new URLSearchParams({
-    client_id: import.meta.env["VITE_GOOGLE_CLIENT_ID"] || "demo-client-id",
+    client_id: import.meta.env["VITE_GOOGLE_CLIENT_ID"] || "",
     redirect_uri: `${window.location.origin}/auth/google/callback`,
     response_type: "code",
     scope: "openid profile email",
@@ -292,7 +325,7 @@ export async function initiateGitHubOAuth() {
   window.localStorage.setItem("github_oauth_state", state);
 
   const params = new URLSearchParams({
-    client_id: import.meta.env["VITE_GITHUB_CLIENT_ID"] || "demo-client-id",
+    client_id: import.meta.env["VITE_GITHUB_CLIENT_ID"] || "",
     redirect_uri: `${window.location.origin}/auth/github/callback`,
     scope: "user:email",
     state,
@@ -370,10 +403,21 @@ export async function verifyEmail(token: string) {
 }
 
 function generateRandomString(length: number): string {
+  if (!globalThis.crypto?.getRandomValues) {
+    throw new Error("A secure random generator is required for OAuth. Use a modern HTTPS browser.");
+  }
+
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+  const acceptanceLimit = Math.floor(256 / chars.length) * chars.length;
   let result = "";
-  for (let i = 0; i < length; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  while (result.length < length) {
+    const values = new Uint8Array(length - result.length);
+    globalThis.crypto.getRandomValues(values);
+    for (const value of values) {
+      if (value >= acceptanceLimit) continue;
+      result += chars.charAt(value % chars.length);
+      if (result.length === length) break;
+    }
   }
   return result;
 }
@@ -551,8 +595,6 @@ export type CurrentUser = {
   createdAt: string;
 };
 
-const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}` });
-
 export async function startProjectWorkflow(
   projectId: string,
   token: string,
@@ -647,7 +689,7 @@ export async function updateProject(
   });
 }
 
-export async function getCurrentUser(token: string) {
+export async function getCurrentUser(token?: string | null) {
   return apiRequest<{ user: CurrentUser; session: { expiresAt: string; rememberMe: boolean } }>(
     "/api/v1/auth/me",
     {
@@ -677,13 +719,17 @@ export async function logout() {
   const token = getStoredSessionToken();
   setStoredSessionToken(null);
   if (typeof window !== "undefined") window.sessionStorage.removeItem("helix_active_project_id");
-  if (!token) return;
+  // In cookie-session mode the server must always be called so the httpOnly cookie is
+  // cleared — there is no client-side token to inspect.
+  if (!token && !COOKIE_SESSIONS) return;
   await apiRequest("/api/v1/auth/logout", { method: "POST", headers: authHeaders(token) }).catch(
     () => null,
   );
 }
 
 export type SystemHealth = {
+  ok?: boolean;
+  service?: string;
   status: string;
   environment: string;
   storage: string;
@@ -694,6 +740,34 @@ export type SystemHealth = {
     configuredProviders: string[];
     mockFallbackAllowed: boolean;
   } | null;
+  /**
+   * Detailed readiness reported by the backend's /api/v1/health (Stage 2+). The legacy
+   * fields above stay stable for existing consumers; this block carries the depth.
+   */
+  readiness?: {
+    storage: {
+      mode?: string;
+      pendingWrites?: number;
+      lastWriteError?: string | null;
+    };
+    execution: {
+      available?: boolean | null;
+      reason?: string | null;
+      active?: number | null;
+      trackedJobs?: number | null;
+      maxConcurrent?: number | null;
+    };
+    providers: SystemHealth["ai"];
+    recovery: {
+      hydratedExecutionJobs: number;
+      interruptedExecutionJobs: number;
+      hydratedPipelineRuns: number;
+      interruptedPipelineRuns: number;
+      recoveredAt: string;
+    } | null;
+  };
+  uptimeSeconds?: number;
+  timestamp?: string;
 };
 
 export async function getSystemHealth() {
@@ -715,8 +789,13 @@ export function subscribeToProjectEvents(
   token: string,
   handlers: { onEvent: (event: WorkflowEvent) => void; onStatus?: (connected: boolean) => void },
 ) {
-  const url = `${getBaseUrl()}/api/v1/projects/${projectId}/workflows/stream?token=${encodeURIComponent(token)}`;
-  const source = new EventSource(url);
+  // Cookie-session mode: the stream authenticates via the httpOnly cookie (withCredentials)
+  // and no token is embedded in the URL. Bearer mode keeps the query-param flow the
+  // EventSource API requires (it cannot send headers).
+  const url = COOKIE_SESSIONS
+    ? `${getBaseUrl()}/api/v1/projects/${projectId}/workflows/stream`
+    : `${getBaseUrl()}/api/v1/projects/${projectId}/workflows/stream?token=${encodeURIComponent(token)}`;
+  const source = new EventSource(url, COOKIE_SESSIONS ? { withCredentials: true } : undefined);
   source.onopen = () => handlers.onStatus?.(true);
   source.onerror = () => handlers.onStatus?.(false);
   source.onmessage = (message) => {
@@ -724,6 +803,399 @@ export function subscribeToProjectEvents(
       handlers.onEvent(JSON.parse(message.data) as WorkflowEvent);
     } catch {
       // Ignore malformed frames.
+    }
+  };
+  return () => source.close();
+}
+
+export type WorkspaceFile = {
+  path: string;
+  name: string;
+  type: string;
+  version: number;
+  updatedAt?: string;
+  bytes: number;
+};
+
+export type ExecutionStatus = {
+  available: boolean;
+  isolation: string;
+  network?: string;
+  reason?: string;
+};
+
+export type ExecutionResult = {
+  executed: boolean;
+  status: string;
+  command?: string[];
+  exitCode?: number | null;
+  signal?: string | null;
+  stdout?: string;
+  stderr?: string;
+  error?: string;
+  timedOut?: boolean;
+  outputTruncated?: boolean;
+  durationMs?: number;
+  sandbox?: {
+    isolation: string;
+    network: string;
+    timeoutMs: number;
+    virtualMemoryBytes?: number;
+    nodeHeapBytes?: number;
+  };
+};
+
+export type ExecutionJob = {
+  id: string;
+  projectId: string;
+  kind: "command" | "test" | "install" | "build" | "verify" | "preview";
+  command: string[];
+  status: "queued" | "running" | "stopping" | "stopped" | "completed" | "failed" | "unavailable";
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  result: ExecutionResult | null;
+};
+
+export type PreviewState = {
+  id: string;
+  projectId: string;
+  status: "starting" | "ready" | "failed" | "stopped";
+  mode: "static" | "server";
+  jobId: string | null;
+  url: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ExecutionEvent = {
+  id?: string;
+  type: string;
+  timestamp: string;
+  projectId?: string;
+  payload?: {
+    job?: ExecutionJob;
+    preview?: PreviewState;
+    jobs?: ExecutionJob[];
+    stream?: "stdout" | "stderr";
+    data?: string;
+    runId?: string;
+    status?: string;
+    round?: number;
+    verified?: boolean;
+    summary?: string;
+    simulated?: boolean;
+    step?: { kind: string; title: string; status: string };
+    error?: string;
+  };
+};
+
+export type RepairProposal = {
+  summary: string;
+  files: Array<{ name: string; type: string; path: string; content: string }>;
+  decisions: Array<{ key: string; decision: string; rationale?: string }>;
+  basedOnJobId: string;
+  provider: string;
+  model: string;
+  simulated: boolean;
+  verified: false;
+  role?: string;
+};
+
+export type RepairRound = {
+  round: number;
+  appliedFiles: Array<{ path: string; version: number }>;
+  proposal: { summary: string; provider: string; model: string; simulated: boolean } | null;
+  jobId: string;
+  exitCode: number | null;
+  status: string;
+  stdout?: string;
+  stderr?: string;
+};
+
+export type RepairVerification = {
+  verified: boolean;
+  finalStatus: string;
+  provider: string | null;
+  simulated: boolean | null;
+  rounds: RepairRound[];
+};
+
+export type PipelineStep = {
+  kind: "generate" | "materialize" | "install" | "test" | "build" | "repair";
+  title: string;
+  status: "running" | "completed" | "failed" | "skipped";
+  startedAt: string;
+  finishedAt?: string | null;
+  jobId?: string | null;
+  verified?: boolean | null;
+  repairRounds?: number;
+  detail?: Record<string, unknown>;
+  error?: string | null;
+};
+
+export type PipelineRun = {
+  id: string;
+  projectId: string;
+  status: "running" | "completed" | "failed";
+  steps: PipelineStep[];
+  startedAt: string;
+  finishedAt: string | null;
+  error: string | null;
+  verified: boolean | null;
+};
+
+export type ProjectContext = {
+  project: {
+    id: string;
+    name: string;
+    description?: string;
+    keyFeatures?: string[];
+    techStack?: string[];
+  };
+  files: Array<{ path: string; bytes: number; version: number; lastEditedBy: string | null }>;
+  fileCount: number;
+  totalBytes: number;
+  packageJson: {
+    valid: boolean;
+    name: string | null;
+    scripts: Record<string, string>;
+    dependencies: string[];
+    devDependencies: string[];
+    error?: string;
+  } | null;
+  recentExecutions: Array<{
+    id: string;
+    kind: string;
+    command: string;
+    status: string;
+    exitCode: number | null;
+    createdAt: string;
+  }>;
+  repairHistory: Array<{
+    createdAt: string;
+    summary: string;
+    verified: boolean;
+    rounds: number;
+    provider: string | null;
+    simulated: boolean | null;
+    command: string;
+  }>;
+  pipelineRuns: Array<{
+    id: string;
+    status: string;
+    startedAt: string;
+    finishedAt: string | null;
+    error: string | null;
+    steps: Array<{ kind: string; status: string; verified: boolean | null }>;
+  }>;
+  promptDigest: string;
+};
+
+export function resolveApiUrl(path: string) {
+  return `${getBaseUrl()}${path}`;
+}
+
+export async function listWorkspaceFiles(projectId: string, token: string) {
+  return apiRequest<{ files: WorkspaceFile[]; execution: ExecutionStatus }>(
+    `/api/v1/projects/${projectId}/files`,
+    { headers: authHeaders(token) },
+  );
+}
+
+export async function readWorkspaceFile(projectId: string, filePath: string, token: string) {
+  return apiRequest<{ file: WorkspaceFile & { content: string; createdBy?: string } }>(
+    `/api/v1/projects/${projectId}/files?path=${encodeURIComponent(filePath)}`,
+    { headers: authHeaders(token) },
+  );
+}
+
+export async function saveWorkspaceFile(
+  projectId: string,
+  filePath: string,
+  content: string,
+  token: string,
+  expectedVersion?: number,
+) {
+  return apiRequest<{ file: WorkspaceFile & { content: string } }>(
+    `/api/v1/projects/${projectId}/files`,
+    {
+      method: "PUT",
+      headers: authHeaders(token),
+      body: JSON.stringify({
+        path: filePath,
+        content,
+        ...(expectedVersion === undefined ? {} : { expectedVersion }),
+      }),
+    },
+  );
+}
+
+export async function deleteWorkspaceFile(projectId: string, filePath: string, token: string) {
+  return apiRequest<{ deleted: true }>(
+    `/api/v1/projects/${projectId}/files?path=${encodeURIComponent(filePath)}`,
+    { method: "DELETE", headers: authHeaders(token) },
+  );
+}
+
+export async function executeWorkspaceCommand(projectId: string, command: string, token: string) {
+  return apiRequest<{ job: ExecutionJob }>(`/api/v1/projects/${projectId}/execute`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({ command }),
+  });
+}
+
+export async function runWorkspaceTests(projectId: string, token: string) {
+  return apiRequest<{ job: ExecutionJob }>(`/api/v1/projects/${projectId}/tests`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({}),
+  });
+}
+
+export async function listExecutionJobs(projectId: string, token: string) {
+  return apiRequest<{
+    jobs: ExecutionJob[];
+    preview: PreviewState | null;
+    execution: ExecutionStatus;
+  }>(`/api/v1/projects/${projectId}/executions`, { headers: authHeaders(token) });
+}
+
+export async function stopExecutionJob(projectId: string, jobId: string, token: string) {
+  return apiRequest<{ job: ExecutionJob }>(
+    `/api/v1/projects/${projectId}/executions/${jobId}/stop`,
+    {
+      method: "POST",
+      headers: authHeaders(token),
+      body: JSON.stringify({}),
+    },
+  );
+}
+
+export async function installWorkspaceDependencies(projectId: string, token: string) {
+  return apiRequest<{ job: ExecutionJob; network: string }>(
+    `/api/v1/projects/${projectId}/install`,
+    {
+      method: "POST",
+      headers: authHeaders(token),
+      body: JSON.stringify({}),
+    },
+  );
+}
+
+export async function buildWorkspaceApplication(
+  projectId: string,
+  token: string,
+  command?: string,
+) {
+  return apiRequest<{ job: ExecutionJob }>(`/api/v1/projects/${projectId}/build`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify(command ? { command } : {}),
+  });
+}
+
+export async function getWorkspacePreview(projectId: string, token: string) {
+  return apiRequest<{ preview: PreviewState | null }>(
+    `/api/v1/projects/${projectId}/preview/status`,
+    {
+      headers: authHeaders(token),
+    },
+  );
+}
+
+export async function startWorkspacePreview(projectId: string, token: string, command?: string) {
+  return apiRequest<{ preview: PreviewState }>(`/api/v1/projects/${projectId}/preview/start`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify(command ? { command } : {}),
+  });
+}
+
+export async function stopWorkspacePreview(projectId: string, token: string) {
+  return apiRequest<{ preview: PreviewState }>(`/api/v1/projects/${projectId}/preview/stop`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({}),
+  });
+}
+
+export async function proposeWorkspaceRepair(
+  projectId: string,
+  jobId: string,
+  filePath: string | null,
+  token: string,
+) {
+  return apiRequest<RepairProposal>(`/api/v1/projects/${projectId}/repair`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({ jobId, filePath }),
+  });
+}
+
+export async function verifyWorkspaceRepair(
+  projectId: string,
+  files: Array<{ path: string; content: string }>,
+  command: string[],
+  token: string,
+  maxRounds = 2,
+) {
+  return apiRequest<RepairVerification>(`/api/v1/projects/${projectId}/repair/verify`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({ files, command, maxRounds }),
+  });
+}
+
+export async function getProjectContext(projectId: string, token: string) {
+  return apiRequest<ProjectContext>(`/api/v1/projects/${projectId}/context`, {
+    headers: authHeaders(token),
+  });
+}
+
+export async function startAutonomousPipeline(
+  projectId: string,
+  token: string,
+  options: {
+    regenerate?: boolean;
+    install?: boolean;
+    test?: boolean;
+    build?: boolean;
+    repairRounds?: number;
+  } = {},
+) {
+  return apiRequest<{ run: PipelineRun }>(`/api/v1/projects/${projectId}/pipeline/run`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify(options),
+  });
+}
+
+export async function listAutonomousPipelineRuns(projectId: string, token: string) {
+  return apiRequest<{ runs: PipelineRun[] }>(`/api/v1/projects/${projectId}/pipeline/runs`, {
+    headers: authHeaders(token),
+  });
+}
+
+export function subscribeToExecutionEvents(
+  projectId: string,
+  token: string,
+  handlers: { onEvent: (event: ExecutionEvent) => void; onStatus?: (connected: boolean) => void },
+) {
+  // Same cookie/bearer split as subscribeToProjectEvents above.
+  const url = COOKIE_SESSIONS
+    ? `${getBaseUrl()}/api/v1/projects/${projectId}/executions/stream`
+    : `${getBaseUrl()}/api/v1/projects/${projectId}/executions/stream?token=${encodeURIComponent(token)}`;
+  const source = new EventSource(url, COOKIE_SESSIONS ? { withCredentials: true } : undefined);
+  source.onopen = () => handlers.onStatus?.(true);
+  source.onerror = () => handlers.onStatus?.(false);
+  source.onmessage = (message) => {
+    try {
+      handlers.onEvent(JSON.parse(message.data) as ExecutionEvent);
+    } catch {
+      // Ignore malformed frames; the next snapshot will restore state.
     }
   };
   return () => source.close();

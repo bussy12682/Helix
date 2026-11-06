@@ -105,8 +105,9 @@ function Projects() {
                   </div>
                   <Meter value={project.progress} />
                 </div>
-                <div className="mt-4 flex gap-2">
-                  <Button asChild size="sm" variant="ghost"><Link to="/office">Office</Link></Button>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <Button asChild size="sm" variant="outline"><Link to="/projects/workspace" search={{ projectId: project.id }}>Workspace</Link></Button>
+                  <Button asChild size="sm" variant="ghost" onClick={() => window.sessionStorage.setItem('helix_active_project_id', project.id)}><Link to="/office">Office</Link></Button>
                   <Button
                     type="button"
                     size="icon"

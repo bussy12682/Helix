@@ -26,6 +26,7 @@ import { Route as OfficeTasksRouteImport } from './routes/office.tasks'
 import { Route as ProjectsIndexRouteImport } from './routes/projects.index'
 import { Route as ProjectsNewRouteImport } from './routes/projects.new'
 import { Route as ProjectsSummaryRouteImport } from './routes/projects.summary'
+import { Route as ProjectsWorkspaceRouteImport } from './routes/projects.workspace'
 import { Route as AuthGithubCallbackRouteImport } from './routes/auth.github.callback'
 import { Route as AuthGoogleCallbackRouteImport } from './routes/auth.google.callback'
 
@@ -114,6 +115,11 @@ const ProjectsSummaryRoute = ProjectsSummaryRouteImport.update({
   path: '/summary',
   getParentRoute: () => ProjectsRoute,
 } as any)
+const ProjectsWorkspaceRoute = ProjectsWorkspaceRouteImport.update({
+  id: '/workspace',
+  path: '/workspace',
+  getParentRoute: () => ProjectsRoute,
+} as any)
 const AuthGithubCallbackRoute = AuthGithubCallbackRouteImport.update({
   id: '/auth/github/callback',
   path: '/auth/github/callback',
@@ -141,6 +147,7 @@ export interface FileRoutesByFullPath {
   '/office/tasks': typeof OfficeTasksRoute
   '/projects/new': typeof ProjectsNewRoute
   '/projects/summary': typeof ProjectsSummaryRoute
+  '/projects/workspace': typeof ProjectsWorkspaceRoute
   '/office/': typeof OfficeIndexRoute
   '/projects/': typeof ProjectsIndexRoute
   '/auth/github/callback': typeof AuthGithubCallbackRoute
@@ -160,6 +167,7 @@ export interface FileRoutesByTo {
   '/office/tasks': typeof OfficeTasksRoute
   '/projects/new': typeof ProjectsNewRoute
   '/projects/summary': typeof ProjectsSummaryRoute
+  '/projects/workspace': typeof ProjectsWorkspaceRoute
   '/office': typeof OfficeIndexRoute
   '/projects': typeof ProjectsIndexRoute
   '/auth/github/callback': typeof AuthGithubCallbackRoute
@@ -182,6 +190,7 @@ export interface FileRoutesById {
   '/office/tasks': typeof OfficeTasksRoute
   '/projects/new': typeof ProjectsNewRoute
   '/projects/summary': typeof ProjectsSummaryRoute
+  '/projects/workspace': typeof ProjectsWorkspaceRoute
   '/office/': typeof OfficeIndexRoute
   '/projects/': typeof ProjectsIndexRoute
   '/auth/github/callback': typeof AuthGithubCallbackRoute
@@ -205,6 +214,7 @@ export interface FileRouteTypes {
     | '/office/tasks'
     | '/projects/new'
     | '/projects/summary'
+    | '/projects/workspace'
     | '/office/'
     | '/projects/'
     | '/auth/github/callback'
@@ -224,6 +234,7 @@ export interface FileRouteTypes {
     | '/office/tasks'
     | '/projects/new'
     | '/projects/summary'
+    | '/projects/workspace'
     | '/office'
     | '/projects'
     | '/auth/github/callback'
@@ -245,6 +256,7 @@ export interface FileRouteTypes {
     | '/office/tasks'
     | '/projects/new'
     | '/projects/summary'
+    | '/projects/workspace'
     | '/office/'
     | '/projects/'
     | '/auth/github/callback'
@@ -389,6 +401,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProjectsSummaryRouteImport
       parentRoute: typeof ProjectsRoute
     }
+    '/projects/workspace': {
+      id: '/projects/workspace'
+      path: '/workspace'
+      fullPath: '/projects/workspace'
+      preLoaderRoute: typeof ProjectsWorkspaceRouteImport
+      parentRoute: typeof ProjectsRoute
+    }
     '/auth/github/callback': {
       id: '/auth/github/callback'
       path: '/auth/github/callback'
@@ -422,12 +441,14 @@ const OfficeRouteWithChildren =
 interface ProjectsRouteChildren {
   ProjectsNewRoute: typeof ProjectsNewRoute
   ProjectsSummaryRoute: typeof ProjectsSummaryRoute
+  ProjectsWorkspaceRoute: typeof ProjectsWorkspaceRoute
   ProjectsIndexRoute: typeof ProjectsIndexRoute
 }
 
 const ProjectsRouteChildren: ProjectsRouteChildren = {
   ProjectsNewRoute: ProjectsNewRoute,
   ProjectsSummaryRoute: ProjectsSummaryRoute,
+  ProjectsWorkspaceRoute: ProjectsWorkspaceRoute,
   ProjectsIndexRoute: ProjectsIndexRoute,
 }
 

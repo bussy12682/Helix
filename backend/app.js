@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { loadConfig } from "./config.js";
 import { createMemoryStore } from "./storage.js";
+import { createPostgresStore } from "./storage-postgres.js";
 import { initializeEmailService, sendVerificationEmail, sendPasswordResetEmail } from "./email.js";
 import { RateLimiter } from "./rate-limiter.js";
 import { validatePasswordComplexity } from "./password-validator.js";
@@ -11,6 +12,17 @@ import { PDFParse } from "pdf-parse";
 import { createAiSubsystem } from "./ai/index.js";
 import { hashPassword, verifyPassword } from "./passwords.js";
 import { WorkflowStateError } from "./ai/orchestrator.js";
+import { WorkspaceService } from "./workspace-service.js";
+import { ExecutionService } from "./execution-service.js";
+import { TaskflowEngine, TaskflowValidationError } from "./taskflow.js";
+import { GitHubService, GitHubExportError } from "./github-service.js";
+import { AGENT_ROLES } from "./ai/contracts.js";
+import { ApplicationService } from "./application-service.js";
+import { RepairService } from "./repair-service.js";
+import { AutonomousPipeline } from "./autonomous-pipeline.js";
+import { buildProjectContext, formatProjectContextForPrompt } from "./project-context.js";
+import { createLogger } from "./logger.js";
+import { TokenBudgetService, AuditLog, BudgetExceededError } from "./operational-governance.js";
 
 const DEFAULT_SECRET = "development-secret-change-me";
 
@@ -75,13 +87,17 @@ function applyStandardHeaders(response, { config, request, requestId }) {
   const allowed = resolveCorsOrigin(config, request.headers.get("origin"));
   if (allowed) {
     headers.set("Access-Control-Allow-Origin", allowed);
-    headers.set("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+    headers.set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
     headers.set("Access-Control-Allow-Headers", "Content-Type,Authorization");
     headers.set("Access-Control-Expose-Headers", "x-request-id,x-correlation-id");
     if (allowed !== "*") headers.append("Vary", "Origin");
   }
   headers.set("x-content-type-options", "nosniff");
-  headers.set("x-frame-options", "DENY");
+  if (/(?:^|;)\s*frame-ancestors\s/i.test(headers.get("content-security-policy") ?? "")) {
+    headers.delete("x-frame-options");
+  } else if (headers.get("x-frame-options") !== "SAMEORIGIN") {
+    headers.set("x-frame-options", "DENY");
+  }
   headers.set("referrer-policy", "no-referrer");
   headers.set("x-request-id", requestId);
   headers.set("x-correlation-id", requestId);
@@ -90,6 +106,7 @@ function applyStandardHeaders(response, { config, request, requestId }) {
 
 export function createApp(overrides = {}) {
   const config = loadConfig(overrides.env ?? process.env);
+  const logger = overrides.logger ?? createLogger({ component: "api", level: config.logLevel });
   if (
     config.nodeEnv === "production" &&
     (!config.jwtSecret ||
@@ -98,12 +115,178 @@ export function createApp(overrides = {}) {
   ) {
     throw new Error("JWT_SECRET must be set to a strong random value in production.");
   }
-  const store = createMemoryStore({ storagePath: overrides.storagePath ?? config.storagePath });
+  const store =
+    overrides.store ??
+    (config.databaseUrl && /^postgres(ql)?:\/\//i.test(config.databaseUrl)
+      ? createPostgresStore({
+          connectionString: config.databaseUrl,
+          poolSize: config.databasePoolSize ?? 10,
+        })
+      : createMemoryStore({ storagePath: overrides.storagePath ?? config.storagePath }));
   const ai = overrides.ai ?? createAiSubsystem(config);
   bindAiToStore(ai, store);
+  // Persistent stores hydrate asynchronously; rebind once state is recovered so
+  // the AI subsystem (workspaces, traces) sees the hydrated data.
+  if (store.ready) store.ready.then(() => bindAiToStore(ai, store)).catch(() => {});
+  // Production approval policy: autonomous runs auto-approve human gates.
+  // Allowed by default outside production; in production it must be explicitly
+  // enabled via HELIX_AUTONOMOUS_AUTO_APPROVE=true.
+  const autoApproveEnabled =
+    config.nodeEnv !== "production" || config.autonomousAutoApprove === true;
+  const workspace =
+    overrides.workspace ??
+    new WorkspaceService({ root: config.workspaceRoot, contextManager: ai.contextManager });
+  const execution =
+    overrides.execution ??
+    new ExecutionService({
+      workspaceService: workspace,
+      maxConcurrent: config.executionMaxConcurrent,
+      maxActiveJobsPerProject: config.maxActiveJobsPerProject,
+      persistence: {
+        saveJob: (job) => store.saveExecutionJob?.(job),
+        deleteJob: (id) => store.deleteExecutionJob?.(id),
+      },
+    });
+  const applications =
+    overrides.applications ??
+    new ApplicationService({
+      workspaceService: workspace,
+      executionService: execution,
+      frameAncestors: config.corsOrigins.includes("*")
+        ? "*"
+        : config.corsOrigins.join(" ") || "'self'",
+      previewTtlMs: config.previewTtlMs,
+    });
+  const taskflow = overrides.taskflow ?? new TaskflowEngine({ executionService: execution });
+  taskflow.hydrate(store.listTaskflows());
+  const persistTaskflow = (plan) => store.saveTaskflow(plan);
+  const github =
+    overrides.github ??
+    new GitHubService({ token: config.githubToken, apiBaseUrl: config.githubApiBaseUrl });
+  const repair =
+    overrides.repair ??
+    new RepairService({
+      workspaceService: workspace,
+      executionService: execution,
+      workforce: ai.workforce,
+      saveHistory: (project, entry) => {
+        store.updateProject(project.id, {
+          repairHistory: [...(project.repairHistory ?? []), entry].slice(-10),
+        });
+      },
+    });
+  const pipeline =
+    overrides.pipeline ??
+    new AutonomousPipeline({
+      ai,
+      workspaceService: workspace,
+      executionService: execution,
+      applicationService: applications,
+      repairService: repair,
+      saveRun: (projectId, summary) => {
+        const project = store.getProjectById(projectId);
+        if (!project) return;
+        store.updateProject(projectId, {
+          pipelineRuns: [
+            ...(project.pipelineRuns ?? []).filter((existing) => existing.id !== summary.id),
+            summary,
+          ].slice(-10),
+        });
+      },
+      persistence: {
+        saveRunRecord: (run) => store.savePipelineRun?.(run),
+        deleteRunRecord: (id) => store.deletePipelineRun?.(id),
+      },
+      // Production approval policy: autonomous runs auto-approve human gates.
+      // Outside production this is allowed by default; in production it must be
+      // explicitly enabled via HELIX_AUTONOMOUS_AUTO_APPROVE=true.
+      autoApproveEnabled,
+    });
+  ai.toolRegistry.setTestRunner((args) => execution.runTests(args.projectId, args));
   const loginRateLimiter = new RateLimiter();
   const registerRateLimiter = new RateLimiter();
   const passwordResetRateLimiter = new RateLimiter();
+  const aiRateLimiter = new RateLimiter();
+
+  // Operational governance: durable token budgets, redacted audit trail, and
+  // the production autonomous-approval policy.
+  const budgets =
+    overrides.budgets ??
+    new TokenBudgetService({
+      store,
+      userDailyTokenLimit: config.userDailyTokenLimit,
+      projectDailyTokenLimit: config.projectDailyTokenLimit,
+      logger,
+    });
+  const audit = overrides.audit ?? new AuditLog({ store });
+
+  // Enforce budgets at the model-router boundary: authorize before every real
+  // provider call, account actual usage after. Mock output is free and skipped.
+  ai.modelRouter?.setUsagePolicy?.({
+    enrich: (context = {}) => ({
+      ...context,
+      userId:
+        context.userId ??
+        (context.projectId ? store.getProjectById(context.projectId)?.ownerId : undefined),
+    }),
+    authorize: (context) => {
+      try {
+        budgets.authorize(context);
+      } catch (error) {
+        if (error instanceof BudgetExceededError) {
+          audit.record({
+            type: "governance.budget_exceeded",
+            userId: context.userId ?? null,
+            projectId: context.projectId ?? null,
+            outcome: "rejected",
+            details: { scope: error.scope, used: error.used, limit: error.limit },
+          });
+        }
+        throw error;
+      }
+    },
+    record: (context, result) => {
+      budgets.record({
+        userId: context.userId ?? null,
+        projectId: context.projectId ?? null,
+        provider: result.provider ?? null,
+        model: result.model ?? null,
+        usage: result.usage ?? null,
+      });
+    },
+  });
+
+  // Audit significant lifecycle events without touching every handler: the
+  // execution service and pipeline already emit structured events.
+  execution.on?.("event", (event) => {
+    if (event.type === "execution_queued" || event.type === "execution_completed") {
+      audit.record({
+        type: `execution.${event.type === "execution_queued" ? "started" : "completed"}`,
+        userId: store.getProjectById(event.projectId)?.ownerId ?? null,
+        projectId: event.projectId,
+        details: {
+          jobId: event.payload?.job?.id,
+          kind: event.payload?.job?.kind,
+          status: event.payload?.job?.status,
+        },
+      });
+    }
+  });
+  pipeline.on?.("event", (event) => {
+    if (["pipeline_started", "pipeline_completed", "pipeline_failed"].includes(event.type)) {
+      audit.record({
+        type: `pipeline.${event.type.replace("pipeline_", "")}`,
+        userId: store.getProjectById(event.projectId)?.ownerId ?? null,
+        projectId: event.projectId,
+        outcome: event.type === "pipeline_failed" ? "failure" : "success",
+        details: {
+          runId: event.payload?.runId,
+          status: event.payload?.status,
+          error: event.payload?.error ?? null,
+        },
+      });
+    }
+  });
 
   // Initialize email service
   initializeEmailService(config);
@@ -112,14 +295,44 @@ export function createApp(overrides = {}) {
     config,
     store,
     ai,
+    logger,
+    budgets,
+    audit,
+    workspace,
+    execution,
+    applications,
+    taskflow,
+    github,
+    repair,
+    pipeline,
     loginRateLimiter,
     registerRateLimiter,
     passwordResetRateLimiter,
     async request(input, init = {}) {
-      const request = input instanceof Request ? input : new Request(input, init);
+      let request = input instanceof Request ? input : new Request(input, init);
       const requestId = randomUUID();
+      const startedAt = Date.now();
       let response;
       try {
+        // Opt-in cookie sessions: when enabled and no bearer header is present,
+        // promote the httpOnly session cookie to the standard bearer path so
+        // every route accepts either credential without per-handler changes.
+        // SameSite=Lax already stops the browser from sending the cookie on
+        // cross-site writes; bearer tokens remain the cross-origin mechanism.
+        if (config.cookieSessions && !request.headers.get("authorization")) {
+          const cookieToken = sessionCookieToken(request, config.sessionCookieName);
+          if (cookieToken) {
+            request = new Request(request.url, {
+              method: request.method,
+              headers: new Headers([
+                ...request.headers,
+                ["authorization", `Bearer ${cookieToken}`],
+              ]),
+              body: ["GET", "HEAD"].includes(request.method) ? undefined : request.body,
+              duplex: ["GET", "HEAD"].includes(request.method) ? undefined : "half",
+            });
+          }
+        }
         const declaredLength = Number(request.headers.get("content-length") ?? 0);
         if (declaredLength > config.maxBodyBytes) {
           throw new HttpError(
@@ -133,6 +346,18 @@ export function createApp(overrides = {}) {
           config,
           store,
           ai,
+          workspace,
+          execution,
+          applications,
+          taskflow,
+          persistTaskflow,
+          github,
+          repair,
+          pipeline,
+          recovery: () => app.recovery,
+          budgets,
+          audit,
+          aiRateLimiter,
           loginRateLimiter,
           registerRateLimiter,
           passwordResetRateLimiter,
@@ -144,18 +369,79 @@ export function createApp(overrides = {}) {
             error: { code: error.code, message: error.message, requestId },
           });
         } else {
-          console.error(`[${requestId}] Unhandled error:`, error);
+          logger.error("unhandled request error", {
+            requestId,
+            method: request.method,
+            path: new URL(request.url).pathname,
+            error: error.message,
+            stack: error.stack?.split("\n", 3).join(" | "),
+          });
           response = jsonResponse(500, {
             error: { code: "INTERNAL_SERVER_ERROR", message: "Unexpected server error", requestId },
           });
         }
       }
-      return applyStandardHeaders(response, { config, request, requestId });
+      const finalResponse = applyStandardHeaders(response, { config, request, requestId });
+      logger.info("request", {
+        requestId,
+        method: request.method,
+        path: new URL(request.url).pathname,
+        status: finalResponse.status,
+        durationMs: Date.now() - startedAt,
+      });
+      return finalResponse;
     },
     close() {
+      applications.close();
+      execution.close();
+      if (typeof store.close === "function") {
+        return store
+          .close()
+          .catch((error) => logger.error("storage close failed", { error: error.message }));
+      }
       store.flush();
+      return Promise.resolve();
     },
   };
+
+  /**
+   * Boot recovery: after the store is ready (PostgreSQL migrations + hydration,
+   * or synchronous memory/file hydration), restore durable job and pipeline-run
+   * records, then finalize anything that was mid-flight when the previous
+   * process died. listen() waits on this so traffic only flows after recovery.
+   */
+  const recoverPersistentState = async () => {
+    const summary = {
+      hydratedExecutionJobs: 0,
+      interruptedExecutionJobs: 0,
+      hydratedPipelineRuns: 0,
+      interruptedPipelineRuns: 0,
+      recoveredAt: new Date().toISOString(),
+    };
+    try {
+      summary.hydratedExecutionJobs =
+        execution.hydrateJobs?.(store.listExecutionJobs?.() ?? []) ?? 0;
+      summary.interruptedExecutionJobs = execution.recoverInterrupted?.() ?? 0;
+      summary.hydratedPipelineRuns = pipeline.hydrateRuns?.(store.listPipelineRuns?.() ?? []) ?? 0;
+      summary.interruptedPipelineRuns = pipeline.recoverInterrupted?.() ?? 0;
+      if (summary.interruptedExecutionJobs || summary.interruptedPipelineRuns) {
+        logger.warn("recovered interrupted work from a previous process", {
+          interruptedExecutionJobs: summary.interruptedExecutionJobs,
+          interruptedPipelineRuns: summary.interruptedPipelineRuns,
+        });
+      } else {
+        logger.info("boot recovery complete", summary);
+      }
+    } catch (error) {
+      logger.error("boot recovery failed", { error: error.message });
+    }
+    app.recovery = summary;
+    return summary;
+  };
+
+  app.ready = (store.ready ?? Promise.resolve()).then(recoverPersistentState).then(() => undefined);
+  app.getStatus = () =>
+    typeof store.getStatus === "function" ? store.getStatus() : { mode: store.mode };
 
   app.fetch = app.request.bind(app);
   return app;
@@ -166,6 +452,18 @@ async function handleRequest({
   config,
   store,
   ai,
+  workspace,
+  execution,
+  applications,
+  taskflow,
+  persistTaskflow,
+  github,
+  repair,
+  pipeline,
+  recovery,
+  budgets,
+  audit,
+  aiRateLimiter,
   loginRateLimiter,
   registerRateLimiter,
   passwordResetRateLimiter,
@@ -179,14 +477,42 @@ async function handleRequest({
   }
 
   if (request.method === "GET" && path === "/api/v1/health") {
+    // Honest readiness: storage health, sandbox execution availability, provider
+    // configuration, and boot-recovery state. The legacy string fields (storage,
+    // ai) stay stable for existing consumers; `readiness` carries the detail.
+    const storeStatus =
+      typeof store.getStatus === "function" ? store.getStatus() : { mode: store.mode ?? "memory" };
+    let executionReadiness = { available: null };
+    try {
+      executionReadiness =
+        typeof execution.getStatus === "function"
+          ? await execution.getStatus()
+          : executionReadiness;
+    } catch (error) {
+      executionReadiness = { available: false, reason: error.message };
+    }
+    const storeDegraded =
+      Boolean(storeStatus.lastWriteError) || (storeStatus.pendingWrites ?? 0) > 0;
     return jsonResponse(200, {
       ok: true,
       service: "helix-core",
-      status: "healthy",
+      status: storeDegraded ? "degraded" : "healthy",
       requestId,
       environment: config.nodeEnv,
-      storage: store.mode ?? (config.storagePath === ":memory:" ? "memory" : "file"),
+      storage: storeStatus.mode ?? "memory",
       ai: ai.modelRouter?.getStatus?.() ?? null,
+      readiness: {
+        storage: storeStatus,
+        execution: {
+          ...executionReadiness,
+          active: execution.active ?? null,
+          trackedJobs: execution.jobs?.size ?? null,
+          maxConcurrent: execution.maxConcurrent ?? null,
+        },
+        providers: ai.modelRouter?.getStatus?.() ?? null,
+        recovery: recovery?.() ?? null,
+      },
+      uptimeSeconds: Math.round(process.uptime()),
       timestamp: new Date().toISOString(),
     });
   }
@@ -195,12 +521,37 @@ async function handleRequest({
     return handleGetMe({ request, store, requestId });
   }
 
+  // Operational governance: self-service spend summary and audit trail.
+  if (request.method === "GET" && path === "/api/v1/usage") {
+    const auth = requireAuth(request, store);
+    if ("error" in auth) return auth.error;
+    const url = new URL(request.url);
+    const projectId = url.searchParams.get("projectId");
+    return jsonResponse(
+      200,
+      { usage: budgets.getSummary({ userId: auth.user.id, projectId }) },
+      { "x-correlation-id": requestId },
+    );
+  }
+
+  if (request.method === "GET" && path === "/api/v1/audit") {
+    const auth = requireAuth(request, store);
+    if ("error" in auth) return auth.error;
+    const url = new URL(request.url);
+    const limit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit") ?? 50) || 50));
+    return jsonResponse(
+      200,
+      { events: audit.listForUser(auth.user.id, { limit }) },
+      { "x-correlation-id": requestId },
+    );
+  }
+
   if (request.method === "PATCH" && path === "/api/v1/auth/me") {
     return handleUpdateMe({ request, store, requestId });
   }
 
   if (request.method === "POST" && path === "/api/v1/auth/logout") {
-    return handleLogout({ request, store, requestId });
+    return handleLogout({ request, config, store, requestId });
   }
 
   if (request.method === "POST" && path === "/api/v1/auth/change-password") {
@@ -208,11 +559,11 @@ async function handleRequest({
   }
 
   if (request.method === "POST" && path === "/api/v1/auth/register") {
-    return handleRegister({ request, config, store, registerRateLimiter, requestId });
+    return handleRegister({ request, config, store, registerRateLimiter, audit, requestId });
   }
 
   if (request.method === "POST" && path === "/api/v1/auth/login") {
-    return handleLogin({ request, config, store, loginRateLimiter, requestId });
+    return handleLogin({ request, config, store, loginRateLimiter, audit, requestId });
   }
 
   if (request.method === "POST" && path === "/api/v1/auth/demo") {
@@ -254,19 +605,35 @@ async function handleRequest({
   }
 
   if (request.method === "POST" && path === "/api/v1/projects") {
-    return handleCreateProject({ request, store, requestId });
+    return handleCreateProject({ request, store, audit, requestId });
   }
 
   if (request.method === "POST" && path === "/api/v1/projects/analyze") {
-    return handleAnalyzeProject({ request, config, store, requestId });
+    return handleAnalyzeProject({
+      request,
+      config,
+      store,
+      requestId,
+      budgets,
+      audit,
+      aiRateLimiter,
+    });
   }
 
   if (request.method === "POST" && path === "/api/v1/voice/turn") {
-    return handleVoiceTurn({ request, config, store, requestId });
+    return handleVoiceTurn({ request, config, store, requestId, budgets, audit, aiRateLimiter });
   }
 
   if (request.method === "POST" && path === "/api/v1/voice/transcribe") {
-    return handleVoiceTranscription({ request, config, store, requestId });
+    return handleVoiceTranscription({
+      request,
+      config,
+      store,
+      requestId,
+      budgets,
+      audit,
+      aiRateLimiter,
+    });
   }
 
   if (request.method === "POST" && path === "/api/v1/projects/extract-document") {
@@ -275,7 +642,17 @@ async function handleRequest({
 
   // AI Workflow and Office routes
   if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/workflows$/.test(path)) {
-    return handleStartProjectWorkflow({ request, store, ai, requestId, path });
+    return handleStartProjectWorkflow({
+      request,
+      store,
+      ai,
+      requestId,
+      path,
+      config,
+      budgets,
+      audit,
+      aiRateLimiter,
+    });
   }
 
   if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/workflows\/stream$/.test(path)) {
@@ -294,8 +671,135 @@ async function handleRequest({
     return handleGetProjectArtifacts({ request, store, ai, requestId, path });
   }
 
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/files$/.test(path)) {
+    return handleWorkspaceFiles({ request, store, workspace, execution, requestId, path });
+  }
+  if (request.method === "PUT" && /^\/api\/v1\/projects\/[^/]+\/files$/.test(path)) {
+    return handleWorkspaceWrite({ request, store, workspace, requestId, path });
+  }
+  if (request.method === "DELETE" && /^\/api\/v1\/projects\/[^/]+\/files$/.test(path)) {
+    return handleWorkspaceDelete({ request, store, workspace, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/execute$/.test(path)) {
+    return handleWorkspaceExecute({ request, store, execution, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/tests$/.test(path)) {
+    return handleWorkspaceTests({ request, store, execution, requestId, path });
+  }
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/executions$/.test(path)) {
+    return handleExecutionList({ request, store, execution, applications, requestId, path });
+  }
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/executions\/stream$/.test(path)) {
+    return handleExecutionStream({
+      request,
+      store,
+      execution,
+      applications,
+      repair,
+      pipeline,
+      requestId,
+      path,
+    });
+  }
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/executions\/[^/]+$/.test(path)) {
+    return handleExecutionGet({ request, store, execution, requestId, path });
+  }
+  if (
+    request.method === "POST" &&
+    /^\/api\/v1\/projects\/[^/]+\/executions\/[^/]+\/stop$/.test(path)
+  ) {
+    return handleExecutionStop({ request, store, execution, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/install$/.test(path)) {
+    return handleApplicationInstall({ request, store, applications, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/build$/.test(path)) {
+    return handleApplicationBuild({ request, store, applications, requestId, path });
+  }
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/preview\/status$/.test(path)) {
+    return handlePreviewStatus({ request, store, applications, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/preview\/start$/.test(path)) {
+    return handlePreviewStart({ request, store, applications, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/preview\/stop$/.test(path)) {
+    return handlePreviewStop({ request, store, applications, requestId, path });
+  }
+  if (/^\/api\/v1\/projects\/[^/]+\/preview(?:\/|$)/.test(path)) {
+    return handlePreviewProxy({ request, store, applications, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/repair$/.test(path)) {
+    return handleWorkspaceRepair({
+      request,
+      store,
+      repair,
+      requestId,
+      path,
+      config,
+      budgets,
+      audit,
+      aiRateLimiter,
+    });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/repair\/verify$/.test(path)) {
+    return handleRepairVerify({
+      request,
+      store,
+      repair,
+      requestId,
+      path,
+      config,
+      budgets,
+      audit,
+      aiRateLimiter,
+    });
+  }
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/context$/.test(path)) {
+    return handleProjectContext({ request, store, workspace, execution, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/pipeline\/run$/.test(path)) {
+    return handlePipelineRun({
+      request,
+      store,
+      pipeline,
+      requestId,
+      path,
+      config,
+      budgets,
+      audit,
+      aiRateLimiter,
+    });
+  }
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/pipeline\/runs$/.test(path)) {
+    return handlePipelineList({ request, store, pipeline, requestId, path });
+  }
+  if (
+    request.method === "GET" &&
+    /^\/api\/v1\/projects\/[^/]+\/pipeline\/runs\/[^/]+$/.test(path)
+  ) {
+    return handlePipelineGet({ request, store, pipeline, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/debug$/.test(path)) {
+    return handleWorkspaceDebug({ request, store, workspace, execution, ai, requestId, path });
+  }
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/taskflows$/.test(path)) {
+    return handleTaskflowList({ request, store, taskflow, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/taskflows$/.test(path)) {
+    return handleTaskflowCreate({ request, store, taskflow, persistTaskflow, requestId, path });
+  }
+  if (
+    request.method === "POST" &&
+    /^\/api\/v1\/projects\/[^/]+\/taskflows\/[^/]+\/run$/.test(path)
+  ) {
+    return handleTaskflowRun({ request, store, taskflow, persistTaskflow, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/github\/export$/.test(path)) {
+    return handleGitHubExport({ request, store, workspace, github, requestId, path });
+  }
+
   if (request.method === "POST" && /^\/api\/v1\/workflows\/[^/]+\/approve$/.test(path)) {
-    return handleApproveWorkflowCheckpoint({ request, store, ai, requestId, path });
+    return handleApproveWorkflowCheckpoint({ request, store, ai, audit, requestId, path });
   }
 
   if (request.method === "POST" && /^\/api\/v1\/workflows\/[^/]+\/retry$/.test(path)) {
@@ -315,7 +819,7 @@ async function handleRequest({
   }
 
   if (request.method === "DELETE" && /^\/api\/v1\/projects\//.test(path)) {
-    return handleDeleteProject({ request, store, ai, requestId, path });
+    return handleDeleteProject({ request, store, ai, workspace, taskflow, requestId, path });
   }
 
   if (request.method === "GET" && /^\/api\/v1\/projects\//.test(path)) {
@@ -432,9 +936,82 @@ function publicUser(user) {
   };
 }
 
+const SESSION_COOKIE_ATTRIBUTES = {
+  httpOnly: true,
+  sameSite: "Lax", // cookies are not sent on cross-site POSTs; bearer remains the cross-origin path
+  path: "/",
+};
+
+function sessionCookieHeader(name, token, { maxAgeSeconds, secure }) {
+  return [
+    `${name}=${token}`,
+    `Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}`,
+    `Path=${SESSION_COOKIE_ATTRIBUTES.path}`,
+    "HttpOnly",
+    `SameSite=${SESSION_COOKIE_ATTRIBUTES.sameSite}`,
+    ...(secure ? ["Secure"] : []),
+  ].join("; ");
+}
+
+function clearedSessionCookieHeader(name, { secure }) {
+  return sessionCookieHeader(name, "", { maxAgeSeconds: 0, secure });
+}
+
+function sessionCookieToken(request, name) {
+  const header = request.headers.get("cookie") ?? "";
+  for (const part of header.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 0) continue;
+    if (part.slice(0, separator).trim() === name) return part.slice(separator + 1).trim() || null;
+  }
+  return null;
+}
+
+function originAllowedForCookies(request, config) {
+  const origin = request.headers.get("origin");
+  if (!origin) return true; // same-origin/non-browser client
+  return config.corsOrigins.includes("*")
+    ? false
+    : config.corsOrigins.includes(origin.replace(/\/$/, ""));
+}
+
 function bearerToken(request) {
   const header = request.headers.get("authorization") ?? "";
   return header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : null;
+}
+
+/**
+ * AI-route governance: per-user rate limiting plus a pre-call budget check so
+ * clients get an immediate 429 instead of a run that fails mid-flight. Every
+ * rejection is audited.
+ */
+function enforceAiGovernance(
+  access,
+  { projectId = null, aiRateLimiter, budgets, audit, config, requestId },
+) {
+  const user = access?.user;
+  if (!user) return; // route-level auth already produced its own error
+  if (aiRateLimiter.isLimited(`ai:${user.id}`, config.aiRateLimitMax, config.aiRateLimitWindowMs)) {
+    audit.record({
+      type: "governance.rate_limited",
+      userId: user.id,
+      projectId,
+      outcome: "rejected",
+      details: { limit: config.aiRateLimitMax, windowMs: config.aiRateLimitWindowMs },
+    });
+    throw Object.assign(new Error("Too many AI requests from this account; please retry later"), {
+      status: 429,
+      code: "RATE_LIMITED",
+    });
+  }
+  try {
+    budgets.authorize({ userId: user.id, projectId });
+  } catch (error) {
+    if (error instanceof BudgetExceededError) {
+      throw Object.assign(new Error(error.message), { status: 429, code: error.code });
+    }
+    throw error;
+  }
 }
 
 function requireProjectAccess(request, store, projectId, requestId) {
@@ -524,10 +1101,16 @@ async function handleUpdateMe({ request, store, requestId }) {
   return jsonResponse(200, { user: publicUser(user) }, { "x-correlation-id": requestId });
 }
 
-async function handleLogout({ request, store, requestId }) {
+async function handleLogout({ request, config, store, requestId }) {
   const token = bearerToken(request);
   if (token) store.deleteSession(token);
-  return jsonResponse(200, { message: "Logged out" }, { "x-correlation-id": requestId });
+  const headers = { "x-correlation-id": requestId };
+  if (config.cookieSessions) {
+    headers["set-cookie"] = clearedSessionCookieHeader(config.sessionCookieName, {
+      secure: config.nodeEnv === "production",
+    });
+  }
+  return jsonResponse(200, { message: "Logged out" }, headers);
 }
 
 async function handleChangePassword({ request, config, store, requestId }) {
@@ -646,7 +1229,7 @@ async function handleCancelWorkflow({ request, store, ai, requestId, path }) {
   }
 }
 
-async function handleRegister({ request, config, store, registerRateLimiter, requestId }) {
+async function handleRegister({ request, config, store, registerRateLimiter, audit, requestId }) {
   const body = await parseJsonBody(request);
   const name = String(body.name ?? "").trim();
   const email = String(body.email ?? "")
@@ -720,6 +1303,7 @@ async function handleRegister({ request, config, store, registerRateLimiter, req
   // Generate and set email verification token
   const verificationToken = `verify_${randomUUID()}`;
   store.setEmailVerificationToken(user.id, verificationToken);
+  audit.record({ type: "auth.register", userId: user.id, details: { email } });
 
   let verificationEmailSent = false;
   try {
@@ -745,7 +1329,7 @@ async function handleRegister({ request, config, store, registerRateLimiter, req
   return jsonResponse(201, response, { "x-correlation-id": requestId });
 }
 
-async function handleLogin({ request, config, store, loginRateLimiter, requestId }) {
+async function handleLogin({ request, config, store, loginRateLimiter, audit, requestId }) {
   const body = await parseJsonBody(request);
   const email = String(body.email ?? "")
     .trim()
@@ -779,6 +1363,12 @@ async function handleLogin({ request, config, store, loginRateLimiter, requestId
     ? await verifyPassword(password, user.passwordHash, config.jwtSecret)
     : { valid: false };
   if (!user || !passwordCheck.valid) {
+    audit.record({
+      type: "auth.login",
+      userId: user?.id ?? null,
+      outcome: "failure",
+      details: { email, reason: "invalid_credentials" },
+    });
     return jsonResponse(401, {
       error: {
         code: "INVALID_CREDENTIALS",
@@ -816,20 +1406,34 @@ async function handleLogin({ request, config, store, loginRateLimiter, requestId
 
   // Reset rate limiter on successful login
   loginRateLimiter.reset(`login:${email}`);
+  audit.record({ type: "auth.login", userId: user.id, outcome: "success", details: { email } });
 
-  return jsonResponse(200, {
-    token: session.token,
-    user: {
-      id: user.id,
-      name: user.name,
-      email: user.email,
+  const headers = { "x-correlation-id": requestId };
+  if (config.cookieSessions && originAllowedForCookies(request, config)) {
+    const maxAgeSeconds = rememberMe ? 30 * 24 * 60 * 60 : 8 * 60 * 60;
+    headers["set-cookie"] = sessionCookieHeader(config.sessionCookieName, session.token, {
+      maxAgeSeconds,
+      secure: config.nodeEnv === "production",
+    });
+  }
+
+  return jsonResponse(
+    200,
+    {
+      token: session.token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+      },
+      expiresAt: session.expiresAt,
+      rememberMe: session.rememberMe,
     },
-    expiresAt: session.expiresAt,
-    rememberMe: session.rememberMe,
-  });
+    headers,
+  );
 }
 
-async function handleDemoLogin({ config, store, requestId }) {
+async function handleDemoLogin({ request, config, store, requestId }) {
   if (!config.demoLoginEnabled) {
     return jsonResponse(403, {
       error: {
@@ -854,6 +1458,14 @@ async function handleDemoLogin({ config, store, requestId }) {
     store.updateUser(user.id, { emailVerified: true, emailVerificationToken: null });
   const session = store.createSession(user.id, true);
 
+  const demoHeaders = { "x-correlation-id": requestId };
+  if (config.cookieSessions && originAllowedForCookies(request, config)) {
+    demoHeaders["set-cookie"] = sessionCookieHeader(config.sessionCookieName, session.token, {
+      maxAgeSeconds: 30 * 24 * 60 * 60,
+      secure: config.nodeEnv === "production",
+    });
+  }
+
   return jsonResponse(
     200,
     {
@@ -862,7 +1474,7 @@ async function handleDemoLogin({ config, store, requestId }) {
       expiresAt: session.expiresAt,
       rememberMe: true,
     },
-    { "x-correlation-id": requestId },
+    demoHeaders,
   );
 }
 
@@ -905,7 +1517,7 @@ async function handleGetDashboard({ request, store, requestId }) {
   );
 }
 
-async function handleCreateProject({ request, store, requestId }) {
+async function handleCreateProject({ request, store, audit, requestId }) {
   const auth = requireAuth(request, store);
   if ("error" in auth) {
     return auth.error;
@@ -944,11 +1556,25 @@ async function handleCreateProject({ request, store, requestId }) {
     keyFeatures,
     techStack,
   });
+  audit.record({
+    type: "project.created",
+    userId: auth.user.id,
+    projectId: project.id,
+    details: { name },
+  });
 
   return jsonResponse(201, project, { "x-correlation-id": requestId });
 }
 
-async function handleAnalyzeProject({ request, config, store, requestId }) {
+async function handleAnalyzeProject({
+  request,
+  config,
+  store,
+  requestId,
+  budgets,
+  audit,
+  aiRateLimiter,
+}) {
   const auth = requireAuth(request, store);
   if ("error" in auth) {
     return auth.error;
@@ -976,9 +1602,15 @@ async function handleAnalyzeProject({ request, config, store, requestId }) {
   }
 
   try {
+    enforceAiGovernance(auth, { aiRateLimiter, budgets, audit, config, requestId });
     const analysis = await analyzeProjectBrief({ name, description, conversation }, config);
     return jsonResponse(200, analysis, { "x-correlation-id": requestId });
   } catch (error) {
+    if (error.status === 429) {
+      return jsonResponse(429, {
+        error: { code: error.code ?? "RATE_LIMITED", message: error.message, requestId },
+      });
+    }
     const code = error?.code ?? "AI_PROVIDER_ERROR";
     const status = code === "AI_NOT_CONFIGURED" ? 503 : 502;
     return jsonResponse(status, {
@@ -992,7 +1624,15 @@ async function handleAnalyzeProject({ request, config, store, requestId }) {
   }
 }
 
-async function handleVoiceTurn({ request, config, store, requestId }) {
+async function handleVoiceTurn({
+  request,
+  config,
+  store,
+  requestId,
+  budgets,
+  audit,
+  aiRateLimiter,
+}) {
   const auth = requireAuth(request, store);
   if ("error" in auth) {
     return auth.error;
@@ -1019,9 +1659,15 @@ async function handleVoiceTurn({ request, config, store, requestId }) {
   }
 
   try {
+    enforceAiGovernance(auth, { aiRateLimiter, budgets, audit, config, requestId });
     const reply = await respondToVoiceTurn({ name, messages }, config);
     return jsonResponse(200, { reply }, { "x-correlation-id": requestId });
   } catch (error) {
+    if (error.status === 429) {
+      return jsonResponse(429, {
+        error: { code: error.code ?? "RATE_LIMITED", message: error.message, requestId },
+      });
+    }
     const code = error?.code ?? "AI_PROVIDER_ERROR";
     return jsonResponse(code === "AI_NOT_CONFIGURED" ? 503 : 502, {
       error: {
@@ -1034,7 +1680,15 @@ async function handleVoiceTurn({ request, config, store, requestId }) {
   }
 }
 
-async function handleVoiceTranscription({ request, config, store, requestId }) {
+async function handleVoiceTranscription({
+  request,
+  config,
+  store,
+  requestId,
+  budgets,
+  audit,
+  aiRateLimiter,
+}) {
   const auth = requireAuth(request, store);
   if ("error" in auth) return auth.error;
 
@@ -1052,6 +1706,7 @@ async function handleVoiceTranscription({ request, config, store, requestId }) {
   }
 
   try {
+    enforceAiGovernance(auth, { aiRateLimiter, budgets, audit, config, requestId });
     const transcript = await transcribeVoiceNote(
       {
         audio: Buffer.from(await file.arrayBuffer()),
@@ -1061,6 +1716,11 @@ async function handleVoiceTranscription({ request, config, store, requestId }) {
     );
     return jsonResponse(200, { transcript }, { "x-correlation-id": requestId });
   } catch (error) {
+    if (error.status === 429) {
+      return jsonResponse(429, {
+        error: { code: error.code ?? "RATE_LIMITED", message: error.message, requestId },
+      });
+    }
     const code = error?.code ?? "AI_PROVIDER_ERROR";
     return jsonResponse(code === "AI_NOT_CONFIGURED" ? 503 : 502, {
       error: {
@@ -1154,7 +1814,7 @@ async function handleExtractProjectDocument({ request, store, requestId }) {
   }
 }
 
-async function handleDeleteProject({ request, store, ai, requestId, path }) {
+async function handleDeleteProject({ request, store, ai, workspace, taskflow, requestId, path }) {
   const auth = requireAuth(request, store);
   if ("error" in auth) {
     return auth.error;
@@ -1184,6 +1844,8 @@ async function handleDeleteProject({ request, store, ai, requestId, path }) {
   }
 
   ai.orchestrator.removeProject?.(projectId);
+  taskflow.removeProject(projectId);
+  await workspace.remove(projectId);
   store.deleteProject(projectId);
   return jsonResponse(
     200,
@@ -1530,7 +2192,17 @@ async function handleVerifyEmail({ request, store, requestId }) {
   });
 }
 
-async function handleStartProjectWorkflow({ request, store, ai, requestId, path }) {
+async function handleStartProjectWorkflow({
+  request,
+  store,
+  ai,
+  requestId,
+  path,
+  config,
+  budgets,
+  audit,
+  aiRateLimiter,
+}) {
   const projectId = path.split("/")[4];
   const access = requireProjectAccess(request, store, projectId, requestId);
   if ("error" in access) return access.error;
@@ -1539,6 +2211,7 @@ async function handleStartProjectWorkflow({ request, store, ai, requestId, path 
   let workflow = ai.orchestrator.getWorkflowForProject(projectId);
   let created = false;
   try {
+    enforceAiGovernance(access, { projectId, aiRateLimiter, budgets, audit, config, requestId });
     if (
       !workflow ||
       (body.restart === true && ["completed", "failed", "cancelled"].includes(workflow.status))
@@ -1547,6 +2220,11 @@ async function handleStartProjectWorkflow({ request, store, ai, requestId, path 
       created = true;
     }
   } catch (error) {
+    if (error.status === 429) {
+      return jsonResponse(429, {
+        error: { code: error.code ?? "RATE_LIMITED", message: error.message, requestId },
+      });
+    }
     return workflowErrorResponse(error, requestId, "WORKFLOW_START_FAILED");
   }
 
@@ -1594,7 +2272,703 @@ async function handleGetProjectArtifacts({ request, store, ai, requestId, path }
   return jsonResponse(200, { artifacts }, { "x-correlation-id": requestId });
 }
 
-async function handleApproveWorkflowCheckpoint({ request, store, ai, requestId, path }) {
+function workspaceErrorResponse(error, requestId) {
+  if (error instanceof GitHubExportError) {
+    const status =
+      error.code === "GITHUB_NOT_CONFIGURED" || error.code === "GITHUB_UNAVAILABLE"
+        ? 503
+        : error.code === "GITHUB_EXPORT_FAILED"
+          ? 502
+          : 400;
+    return jsonResponse(status, { error: { code: error.code, message: error.message, requestId } });
+  }
+  if (error instanceof TaskflowValidationError) {
+    return jsonResponse(400, { error: { code: error.code, message: error.message, requestId } });
+  }
+  return jsonResponse(400, {
+    error: { code: "WORKSPACE_REQUEST_FAILED", message: error.message, requestId },
+  });
+}
+
+function workspaceProjectId(path) {
+  return path.split("/")[4];
+}
+
+async function handleWorkspaceFiles({ request, store, workspace, execution, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const filePath = new URL(request.url).searchParams.get("path");
+    if (filePath) {
+      const file = workspace.read(projectId, filePath);
+      if (!file)
+        return jsonResponse(404, {
+          error: { code: "FILE_NOT_FOUND", message: "Workspace file not found", requestId },
+        });
+      return jsonResponse(200, { file }, { "x-correlation-id": requestId });
+    }
+    return jsonResponse(
+      200,
+      { files: workspace.list(projectId), execution: await execution.getStatus() },
+      { "x-correlation-id": requestId },
+    );
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleWorkspaceWrite({ request, store, workspace, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const body = await parseJsonBody(request);
+    if (body.expectedVersion !== undefined) {
+      const existing = workspace.read(projectId, String(body.path ?? ""));
+      if (!existing || existing.version !== Number(body.expectedVersion)) {
+        return jsonResponse(409, {
+          error: {
+            code: "FILE_VERSION_CONFLICT",
+            message: "The file changed after it was loaded. Reload before saving.",
+            requestId,
+          },
+        });
+      }
+    }
+    const file = await workspace.write(projectId, String(body.path ?? ""), body.content, {
+      createdBy: access.user.id,
+    });
+    return jsonResponse(200, { file }, { "x-correlation-id": requestId });
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleWorkspaceDelete({ request, store, workspace, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const filePath = new URL(request.url).searchParams.get("path") ?? "";
+    const deleted = await workspace.delete(projectId, filePath);
+    if (!deleted)
+      return jsonResponse(404, {
+        error: { code: "FILE_NOT_FOUND", message: "Workspace file not found", requestId },
+      });
+    return jsonResponse(200, { deleted: true }, { "x-correlation-id": requestId });
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleWorkspaceExecute({ request, store, execution, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const body = await parseJsonBody(request);
+    if (body.wait === true) {
+      const result = await execution.execute(projectId, {
+        command: body.command,
+        timeoutMs: body.timeoutMs,
+      });
+      return jsonResponse(200, result, { "x-correlation-id": requestId });
+    }
+    const job = execution.start(projectId, { command: body.command, timeoutMs: body.timeoutMs });
+    return jsonResponse(
+      202,
+      { job: execution.toPublicJob(job) },
+      { "x-correlation-id": requestId },
+    );
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleWorkspaceTests({ request, store, execution, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const body = await parseJsonBody(request);
+    const job = execution.start(projectId, {
+      command: body.command ?? "npm test",
+      timeoutMs: body.timeoutMs ?? 60000,
+      testSuiteName: String(body.testSuiteName ?? "Project tests").slice(0, 200),
+      kind: "test",
+    });
+    return jsonResponse(
+      202,
+      { job: execution.toPublicJob(job) },
+      { "x-correlation-id": requestId },
+    );
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleExecutionList({ request, store, execution, applications, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  return jsonResponse(
+    200,
+    {
+      jobs: execution.listJobs(projectId),
+      preview: applications.getPreview(projectId),
+      execution: await execution.getStatus(),
+    },
+    { "x-correlation-id": requestId },
+  );
+}
+
+async function handleExecutionGet({ request, store, execution, requestId, path }) {
+  const parts = path.split("/");
+  const projectId = parts[4];
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  const job = execution.getJob(projectId, parts[6]);
+  if (!job)
+    return jsonResponse(404, {
+      error: { code: "EXECUTION_NOT_FOUND", message: "Execution job not found", requestId },
+    });
+  return jsonResponse(200, { job: execution.toPublicJob(job) }, { "x-correlation-id": requestId });
+}
+
+async function handleExecutionStop({ request, store, execution, requestId, path }) {
+  const parts = path.split("/");
+  const projectId = parts[4];
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  const job = execution.stop(projectId, parts[6]);
+  if (!job)
+    return jsonResponse(404, {
+      error: { code: "EXECUTION_NOT_FOUND", message: "Execution job not found", requestId },
+    });
+  return jsonResponse(200, { job: execution.toPublicJob(job) }, { "x-correlation-id": requestId });
+}
+
+async function handleApplicationInstall({ request, store, applications, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const job = await applications.install(projectId);
+    return jsonResponse(
+      202,
+      {
+        job: applications.executionService.toPublicJob(job),
+        network: "enabled-for-package-installation",
+      },
+      { "x-correlation-id": requestId },
+    );
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleApplicationBuild({ request, store, applications, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const body = await parseJsonBody(request);
+    const job = await applications.build(projectId, { command: body.command });
+    return jsonResponse(
+      202,
+      { job: applications.executionService.toPublicJob(job) },
+      { "x-correlation-id": requestId },
+    );
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handlePreviewStatus({ request, store, applications, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  return jsonResponse(
+    200,
+    { preview: applications.getPreview(projectId) },
+    { "x-correlation-id": requestId },
+  );
+}
+
+async function handlePreviewStart({ request, store, applications, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const body = await parseJsonBody(request);
+    const preview = await applications.startPreview(projectId, {
+      command: body.command,
+      directory: body.directory,
+    });
+    return jsonResponse(
+      preview.status === "ready" ? 200 : 503,
+      { preview: applications.toPublicPreview(preview) },
+      { "x-correlation-id": requestId },
+    );
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handlePreviewStop({ request, store, applications, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  const preview = applications.stopPreview(projectId);
+  if (!preview)
+    return jsonResponse(404, {
+      error: {
+        code: "PREVIEW_NOT_FOUND",
+        message: "No preview exists for this project",
+        requestId,
+      },
+    });
+  return jsonResponse(
+    200,
+    { preview: applications.toPublicPreview(preview) },
+    { "x-correlation-id": requestId },
+  );
+}
+
+async function handlePreviewProxy({ request, store, applications, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const queryToken = new URL(request.url).searchParams.get("token");
+  const previewPrefix = `/api/v1/projects/${projectId}/preview/`;
+  const pathToken = path.startsWith(previewPrefix)
+    ? path.slice(previewPrefix.length).split("/")[0] || null
+    : null;
+  const pathPreview = pathToken ? applications.authorize(projectId, pathToken) : null;
+  let preview = queryToken ? applications.authorize(projectId, queryToken) : pathPreview;
+  if ((queryToken || pathToken) && !preview && !bearerToken(request)) {
+    return jsonResponse(404, {
+      error: {
+        code: "PREVIEW_NOT_READY",
+        message: "Preview is not running or the preview token is invalid",
+        requestId,
+      },
+    });
+  }
+  if (!preview) {
+    const access = requireProjectAccess(request, store, projectId, requestId);
+    if ("error" in access) return access.error;
+    const current = applications.getPreview(projectId);
+    if (current?.status === "ready") preview = applications.previews.get(projectId);
+  }
+  if (!preview)
+    return jsonResponse(404, {
+      error: {
+        code: "PREVIEW_NOT_READY",
+        message: "Preview is not running or the preview token is invalid",
+        requestId,
+      },
+    });
+  return applications.proxy(preview, request);
+}
+
+async function handleExecutionStream({
+  request,
+  store,
+  execution,
+  applications,
+  repair,
+  pipeline,
+  requestId,
+  path,
+}) {
+  const url = new URL(request.url);
+  const token = url.searchParams.get("token") || bearerToken(request);
+  if (!token)
+    return jsonResponse(401, {
+      error: { code: "UNAUTHORIZED", message: "Missing token", requestId },
+    });
+  const projectId = workspaceProjectId(path);
+  const authed = new Request(request.url, { headers: { authorization: `Bearer ${token}` } });
+  const access = requireProjectAccess(authed, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  let cleanup = null;
+  const stream = new ReadableStream({
+    start(controller) {
+      const encoder = new TextEncoder();
+      let closed = false;
+      const write = (text) => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(text));
+        } catch {
+          cleanup?.();
+        }
+      };
+      const send = (event) =>
+        write(`id: ${event.id ?? randomUUID()}\ndata: ${JSON.stringify(event)}\n\n`);
+      write("retry: 2000\n\n");
+      send({
+        type: "execution_snapshot",
+        timestamp: new Date().toISOString(),
+        projectId,
+        payload: {
+          jobs: execution.listJobs(projectId),
+          preview: applications.getPreview(projectId),
+        },
+      });
+      const onExecution = (event) => {
+        if (event.projectId === projectId) send(event);
+      };
+      const onPreview = (event) => {
+        if (event.projectId === projectId) send(event);
+      };
+      const onRepair = (event) => {
+        if (event.projectId === projectId) send(event);
+      };
+      const onPipeline = (event) => {
+        if (event.projectId === projectId) send(event);
+      };
+      execution.on("event", onExecution);
+      applications.on("event", onPreview);
+      repair.on("event", onRepair);
+      pipeline.on("event", onPipeline);
+      const heartbeat = setInterval(() => write(": heartbeat\n\n"), 15000);
+      heartbeat.unref?.();
+      cleanup = () => {
+        if (closed) return;
+        closed = true;
+        clearInterval(heartbeat);
+        execution.off("event", onExecution);
+        applications.off("event", onPreview);
+        repair.off("event", onRepair);
+        pipeline.off("event", onPipeline);
+      };
+      request.signal.addEventListener("abort", cleanup, { once: true });
+    },
+    cancel() {
+      cleanup?.();
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+    },
+  });
+}
+
+async function handleWorkspaceRepair({
+  request,
+  store,
+  repair,
+  requestId,
+  path,
+  config,
+  budgets,
+  audit,
+  aiRateLimiter,
+}) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const body = await parseJsonBody(request);
+    enforceAiGovernance(access, { projectId, aiRateLimiter, budgets, audit, config, requestId });
+    const proposal = await repair.propose({
+      project: access.project,
+      jobId: body.jobId,
+      filePath: body.filePath ?? null,
+    });
+    return jsonResponse(200, proposal, { "x-correlation-id": requestId });
+  } catch (error) {
+    if (error.status === 429) {
+      return jsonResponse(429, {
+        error: { code: error.code ?? "RATE_LIMITED", message: error.message, requestId },
+      });
+    }
+    const providerError = RepairService.providerErrorResponse(error, requestId);
+    if (providerError) return jsonResponse(providerError.status, providerError.body);
+    if (error.status === 404) {
+      return jsonResponse(404, {
+        error: { code: "EXECUTION_NOT_FOUND", message: error.message, requestId },
+      });
+    }
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleRepairVerify({
+  request,
+  store,
+  repair,
+  requestId,
+  path,
+  config,
+  budgets,
+  audit,
+  aiRateLimiter,
+}) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const body = await parseJsonBody(request);
+    const files = Array.isArray(body.files) ? body.files : null;
+    if (!files?.length) {
+      return jsonResponse(400, {
+        error: { code: "NO_FILES", message: "Pass the reviewed files to apply", requestId },
+      });
+    }
+    if (!Array.isArray(body.command) || !body.command.length || body.command.length > 64) {
+      return jsonResponse(400, {
+        error: {
+          code: "INVALID_COMMAND",
+          message: "Pass the command array to rerun for verification",
+          requestId,
+        },
+      });
+    }
+    const verification = await repair.applyAndVerify({
+      project: access.project,
+      files: files.map((file) => ({ path: String(file.path), content: String(file.content) })),
+      command: body.command.map(String),
+      maxRounds: body.maxRounds ?? 1,
+      verifyTimeoutMs: body.verifyTimeoutMs ?? 120000,
+      createdBy: "user-verified-repair",
+    });
+    return jsonResponse(200, verification, { "x-correlation-id": requestId });
+  } catch (error) {
+    const providerError = RepairService.providerErrorResponse(error, requestId);
+    if (providerError) return jsonResponse(providerError.status, providerError.body);
+    if (error.status === 400 || error.status === 404) {
+      return jsonResponse(error.status, {
+        error: { code: "REPAIR_INVALID", message: error.message, requestId },
+      });
+    }
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleProjectContext({ request, store, workspace, execution, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  const context = buildProjectContext({
+    workspaceService: workspace,
+    executionService: execution,
+    project: access.project,
+  });
+  return jsonResponse(
+    200,
+    { ...context, promptDigest: formatProjectContextForPrompt(context) },
+    { "x-correlation-id": requestId },
+  );
+}
+
+async function handlePipelineRun({
+  request,
+  store,
+  pipeline,
+  requestId,
+  path,
+  config,
+  budgets,
+  audit,
+  aiRateLimiter,
+}) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  let options = {};
+  try {
+    const body = await parseJsonBody(request);
+    options = body && typeof body === "object" ? body : {};
+  } catch {
+    options = {};
+  }
+  try {
+    enforceAiGovernance(access, { projectId, aiRateLimiter, budgets, audit, config, requestId });
+    const run = pipeline.start({ project: access.project, options });
+    return jsonResponse(202, { run }, { "x-correlation-id": requestId });
+  } catch (error) {
+    if (error.status === 403) {
+      return jsonResponse(403, {
+        error: { code: "AUTONOMOUS_APPROVAL_REQUIRED", message: error.message, requestId },
+      });
+    }
+    if (error.status === 409) {
+      return jsonResponse(409, {
+        error: { code: "PIPELINE_ALREADY_RUNNING", message: error.message, requestId },
+      });
+    }
+    if (error.status === 429) {
+      return jsonResponse(429, {
+        error: { code: error.code ?? "RATE_LIMITED", message: error.message, requestId },
+      });
+    }
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handlePipelineList({ request, store, pipeline, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  return jsonResponse(
+    200,
+    { runs: pipeline.listRuns(projectId) },
+    { "x-correlation-id": requestId },
+  );
+}
+
+async function handlePipelineGet({ request, store, pipeline, requestId, path }) {
+  const parts = path.split("/");
+  const projectId = parts[4];
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  const run = pipeline.getRun(projectId, parts[7]);
+  if (!run)
+    return jsonResponse(404, {
+      error: { code: "PIPELINE_RUN_NOT_FOUND", message: "Autonomous run not found", requestId },
+    });
+  return jsonResponse(200, { run }, { "x-correlation-id": requestId });
+}
+
+async function handleWorkspaceDebug({ request, store, workspace, execution, ai, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const body = await parseJsonBody(request);
+    const findings = [];
+    for (const file of workspace.list(projectId)) {
+      const artifact = workspace.read(projectId, file.path);
+      if (file.path.endsWith(".json")) {
+        try {
+          JSON.parse(artifact.content);
+        } catch (error) {
+          findings.push({
+            rule: "INVALID_JSON",
+            severity: "High",
+            file: file.path,
+            message: error.message,
+          });
+        }
+      }
+      const report = await ai.toolRegistry.executeTool(
+        AGENT_ROLES.SECURITY_ENGINEER,
+        "security_analyzer",
+        { code: artifact.content, filePath: file.path },
+      );
+      findings.push(...report.findings);
+    }
+    let runtime = null;
+    if (body.command)
+      runtime = await execution.execute(projectId, {
+        command: body.command,
+        timeoutMs: body.timeoutMs,
+      });
+    const output = `${runtime?.stdout ?? ""}\n${runtime?.stderr ?? ""}`;
+    const recommendations = [];
+    if (/Cannot find module|ERR_MODULE_NOT_FOUND/.test(output))
+      recommendations.push("Install or declare the missing dependency, then rerun the command.");
+    if (/SyntaxError|Unexpected token/.test(output))
+      recommendations.push("Inspect the syntax error location shown in the runtime output.");
+    if (findings.some((finding) => finding.rule === "HARDCODED_SECRET"))
+      recommendations.push(
+        "Move hardcoded credentials into server-side environment variables and rotate exposed values.",
+      );
+    if (findings.some((finding) => finding.rule === "UNSAFE_EVAL"))
+      recommendations.push(
+        "Replace dynamic eval/Function execution with explicit, validated logic.",
+      );
+    if (runtime?.timedOut)
+      recommendations.push(
+        "Check for hanging handles or increase the bounded timeout only after inspecting the command.",
+      );
+    return jsonResponse(
+      200,
+      { findings, runtime, recommendations, analysis: "deterministic-static-and-runtime" },
+      { "x-correlation-id": requestId },
+    );
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleTaskflowList({ request, store, taskflow, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  return jsonResponse(
+    200,
+    { plans: taskflow.getForProject(projectId) },
+    { "x-correlation-id": requestId },
+  );
+}
+
+async function handleTaskflowCreate({
+  request,
+  store,
+  taskflow,
+  persistTaskflow,
+  requestId,
+  path,
+}) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const plan = taskflow.create(projectId, await parseJsonBody(request), {
+      persist: persistTaskflow,
+    });
+    return jsonResponse(201, plan, { "x-correlation-id": requestId });
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleTaskflowRun({ request, store, taskflow, persistTaskflow, requestId, path }) {
+  const parts = path.split("/");
+  const projectId = parts[4];
+  const planId = parts[6];
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  if (!taskflow.getOwned(projectId, planId))
+    return jsonResponse(404, {
+      error: { code: "TASKFLOW_NOT_FOUND", message: "TASKFLOW plan not found", requestId },
+    });
+  try {
+    const plan = await taskflow.run(planId, { persist: persistTaskflow });
+    return jsonResponse(200, plan, { "x-correlation-id": requestId });
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleGitHubExport({ request, store, workspace, github, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const body = await parseJsonBody(request);
+    const result = await github.exportProject({
+      repoName: String(body.repoName ?? ""),
+      description: String(body.description ?? access.project.description ?? ""),
+      private: body.private !== false,
+      branch: body.branch ? String(body.branch) : null,
+      artifacts: workspace.list(projectId).map((file) => workspace.read(projectId, file.path)),
+    });
+    return jsonResponse(201, result, { "x-correlation-id": requestId });
+  } catch (error) {
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleApproveWorkflowCheckpoint({ request, store, ai, audit, requestId, path }) {
   const access = requireWorkflowAccess(request, store, ai, path.split("/")[4], requestId);
   if ("error" in access) return access.error;
 
@@ -1609,6 +2983,13 @@ async function handleApproveWorkflowCheckpoint({ request, store, ai, requestId, 
       approved,
       comments,
       revise,
+    });
+    audit.record({
+      type: "workflow.approval_decision",
+      userId: access.user.id,
+      projectId: workflow.projectId,
+      outcome: approved ? "approved" : "rejected",
+      details: { workflowId: workflow.id, checkpointType, revise },
     });
     if (approved && workflow.status === "running") {
       const run = ai.orchestrator.runNextSteps(workflow.id);

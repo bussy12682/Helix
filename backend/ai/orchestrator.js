@@ -434,6 +434,7 @@ export class Orchestrator {
         context,
         options: {
           ...options,
+          usageContext: { projectId: workflow.projectId },
           onToken: (delta) => {
             task.streamedChars += delta.length;
             // Approaches 90% asymptotically while tokens arrive.

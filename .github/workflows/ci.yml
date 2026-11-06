@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run backend and integration tests
+        run: npm test
+
+      - name: Check TypeScript
+        run: npm run typecheck
+
+      - name: Check lint and formatting (pre-existing debt, non-blocking)
+        # 1000+ Prettier-only errors exist across the repo; tracked for a dedicated format PR.
+        run: npm run lint
+        continue-on-error: true
+
+      - name: Audit dependencies for high-severity vulnerabilities
+        run: npm audit --audit-level=high
+
+      - name: Build production assets
+        run: npm run build
+        env:
+          NODE_ENV: production

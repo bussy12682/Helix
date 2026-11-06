@@ -5,6 +5,7 @@
  */
 
 import { AGENT_ROLES } from "./contracts.js";
+import { normalizeWorkspacePath } from "../workspace-paths.js";
 
 export class ContextManager {
   constructor({ onChange = null } = {}) {
@@ -81,14 +82,28 @@ export class ContextManager {
    * Stores or updates an artifact within the workspace with version incrementing.
    */
   saveArtifact(projectId, { name, type, path, content, createdBy, taskId }) {
+    const normalizedPath = normalizeWorkspacePath(path);
+    if (typeof content !== "string" || Buffer.byteLength(content) > 2 * 1024 * 1024) {
+      throw new Error("Artifacts must be UTF-8 strings no larger than 2 MiB");
+    }
     const ws = this.getOrCreateWorkspace(projectId);
-    const existing = ws.artifacts.get(path);
+    const existing = ws.artifacts.get(normalizedPath);
+    if (!existing && ws.artifacts.size >= 2000) {
+      throw new Error("A maximum of 2,000 files is allowed per workspace");
+    }
+    const otherBytes = [...ws.artifacts.values()].reduce(
+      (total, artifact) => total + (artifact.path === normalizedPath ? 0 : Buffer.byteLength(artifact.content)),
+      0,
+    );
+    if (otherBytes + Buffer.byteLength(content) > 50 * 1024 * 1024) {
+      throw new Error("Workspace files exceed the 50 MiB project limit");
+    }
     const version = existing ? existing.version + 1 : 1;
 
     const record = {
       name,
       type,
-      path,
+      path: normalizedPath,
       content,
       version,
       createdBy,
@@ -96,7 +111,7 @@ export class ContextManager {
       updatedAt: new Date().toISOString(),
     };
 
-    ws.artifacts.set(path, record);
+    ws.artifacts.set(normalizedPath, record);
     this.notifyChange(projectId);
     return record;
   }
