@@ -783,7 +783,7 @@ export type ExecutionResult = {
 export type ExecutionJob = {
   id: string;
   projectId: string;
-  kind: "command" | "test" | "install" | "build" | "preview";
+  kind: "command" | "test" | "install" | "build" | "verify" | "preview";
   command: string[];
   status: "queued" | "running" | "stopping" | "stopped" | "completed" | "failed" | "unavailable";
   createdAt: string;
@@ -815,6 +815,14 @@ export type ExecutionEvent = {
     jobs?: ExecutionJob[];
     stream?: "stdout" | "stderr";
     data?: string;
+    runId?: string;
+    status?: string;
+    round?: number;
+    verified?: boolean;
+    summary?: string;
+    simulated?: boolean;
+    step?: { kind: string; title: string; status: string };
+    error?: string;
   };
 };
 
@@ -827,6 +835,97 @@ export type RepairProposal = {
   model: string;
   simulated: boolean;
   verified: false;
+  role?: string;
+};
+
+export type RepairRound = {
+  round: number;
+  appliedFiles: Array<{ path: string; version: number }>;
+  proposal: { summary: string; provider: string; model: string; simulated: boolean } | null;
+  jobId: string;
+  exitCode: number | null;
+  status: string;
+  stdout?: string;
+  stderr?: string;
+};
+
+export type RepairVerification = {
+  verified: boolean;
+  finalStatus: string;
+  provider: string | null;
+  simulated: boolean | null;
+  rounds: RepairRound[];
+};
+
+export type PipelineStep = {
+  kind: "generate" | "materialize" | "install" | "test" | "build" | "repair";
+  title: string;
+  status: "running" | "completed" | "failed" | "skipped";
+  startedAt: string;
+  finishedAt?: string | null;
+  jobId?: string | null;
+  verified?: boolean | null;
+  repairRounds?: number;
+  detail?: Record<string, unknown>;
+  error?: string | null;
+};
+
+export type PipelineRun = {
+  id: string;
+  projectId: string;
+  status: "running" | "completed" | "failed";
+  steps: PipelineStep[];
+  startedAt: string;
+  finishedAt: string | null;
+  error: string | null;
+  verified: boolean | null;
+};
+
+export type ProjectContext = {
+  project: {
+    id: string;
+    name: string;
+    description?: string;
+    keyFeatures?: string[];
+    techStack?: string[];
+  };
+  files: Array<{ path: string; bytes: number; version: number; lastEditedBy: string | null }>;
+  fileCount: number;
+  totalBytes: number;
+  packageJson: {
+    valid: boolean;
+    name: string | null;
+    scripts: Record<string, string>;
+    dependencies: string[];
+    devDependencies: string[];
+    error?: string;
+  } | null;
+  recentExecutions: Array<{
+    id: string;
+    kind: string;
+    command: string;
+    status: string;
+    exitCode: number | null;
+    createdAt: string;
+  }>;
+  repairHistory: Array<{
+    createdAt: string;
+    summary: string;
+    verified: boolean;
+    rounds: number;
+    provider: string | null;
+    simulated: boolean | null;
+    command: string;
+  }>;
+  pipelineRuns: Array<{
+    id: string;
+    status: string;
+    startedAt: string;
+    finishedAt: string | null;
+    error: string | null;
+    steps: Array<{ kind: string; status: string; verified: boolean | null }>;
+  }>;
+  promptDigest: string;
 };
 
 export function resolveApiUrl(path: string) {
@@ -859,7 +958,11 @@ export async function saveWorkspaceFile(
     {
       method: "PUT",
       headers: authHeaders(token),
-      body: JSON.stringify({ path: filePath, content, ...(expectedVersion === undefined ? {} : { expectedVersion }) }),
+      body: JSON.stringify({
+        path: filePath,
+        content,
+        ...(expectedVersion === undefined ? {} : { expectedVersion }),
+      }),
     },
   );
 }
@@ -888,29 +991,40 @@ export async function runWorkspaceTests(projectId: string, token: string) {
 }
 
 export async function listExecutionJobs(projectId: string, token: string) {
-  return apiRequest<{ jobs: ExecutionJob[]; preview: PreviewState | null; execution: ExecutionStatus }>(
-    `/api/v1/projects/${projectId}/executions`,
-    { headers: authHeaders(token) },
-  );
+  return apiRequest<{
+    jobs: ExecutionJob[];
+    preview: PreviewState | null;
+    execution: ExecutionStatus;
+  }>(`/api/v1/projects/${projectId}/executions`, { headers: authHeaders(token) });
 }
 
 export async function stopExecutionJob(projectId: string, jobId: string, token: string) {
-  return apiRequest<{ job: ExecutionJob }>(`/api/v1/projects/${projectId}/executions/${jobId}/stop`, {
-    method: "POST",
-    headers: authHeaders(token),
-    body: JSON.stringify({}),
-  });
+  return apiRequest<{ job: ExecutionJob }>(
+    `/api/v1/projects/${projectId}/executions/${jobId}/stop`,
+    {
+      method: "POST",
+      headers: authHeaders(token),
+      body: JSON.stringify({}),
+    },
+  );
 }
 
 export async function installWorkspaceDependencies(projectId: string, token: string) {
-  return apiRequest<{ job: ExecutionJob; network: string }>(`/api/v1/projects/${projectId}/install`, {
-    method: "POST",
-    headers: authHeaders(token),
-    body: JSON.stringify({}),
-  });
+  return apiRequest<{ job: ExecutionJob; network: string }>(
+    `/api/v1/projects/${projectId}/install`,
+    {
+      method: "POST",
+      headers: authHeaders(token),
+      body: JSON.stringify({}),
+    },
+  );
 }
 
-export async function buildWorkspaceApplication(projectId: string, token: string, command?: string) {
+export async function buildWorkspaceApplication(
+  projectId: string,
+  token: string,
+  command?: string,
+) {
   return apiRequest<{ job: ExecutionJob }>(`/api/v1/projects/${projectId}/build`, {
     method: "POST",
     headers: authHeaders(token),
@@ -919,9 +1033,12 @@ export async function buildWorkspaceApplication(projectId: string, token: string
 }
 
 export async function getWorkspacePreview(projectId: string, token: string) {
-  return apiRequest<{ preview: PreviewState | null }>(`/api/v1/projects/${projectId}/preview/status`, {
-    headers: authHeaders(token),
-  });
+  return apiRequest<{ preview: PreviewState | null }>(
+    `/api/v1/projects/${projectId}/preview/status`,
+    {
+      headers: authHeaders(token),
+    },
+  );
 }
 
 export async function startWorkspacePreview(projectId: string, token: string, command?: string) {
@@ -950,6 +1067,50 @@ export async function proposeWorkspaceRepair(
     method: "POST",
     headers: authHeaders(token),
     body: JSON.stringify({ jobId, filePath }),
+  });
+}
+
+export async function verifyWorkspaceRepair(
+  projectId: string,
+  files: Array<{ path: string; content: string }>,
+  command: string[],
+  token: string,
+  maxRounds = 2,
+) {
+  return apiRequest<RepairVerification>(`/api/v1/projects/${projectId}/repair/verify`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({ files, command, maxRounds }),
+  });
+}
+
+export async function getProjectContext(projectId: string, token: string) {
+  return apiRequest<ProjectContext>(`/api/v1/projects/${projectId}/context`, {
+    headers: authHeaders(token),
+  });
+}
+
+export async function startAutonomousPipeline(
+  projectId: string,
+  token: string,
+  options: {
+    regenerate?: boolean;
+    install?: boolean;
+    test?: boolean;
+    build?: boolean;
+    repairRounds?: number;
+  } = {},
+) {
+  return apiRequest<{ run: PipelineRun }>(`/api/v1/projects/${projectId}/pipeline/run`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify(options),
+  });
+}
+
+export async function listAutonomousPipelineRuns(projectId: string, token: string) {
+  return apiRequest<{ runs: PipelineRun[] }>(`/api/v1/projects/${projectId}/pipeline/runs`, {
+    headers: authHeaders(token),
   });
 }
 

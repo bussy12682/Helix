@@ -16,9 +16,10 @@ import { ExecutionService } from "./execution-service.js";
 import { TaskflowEngine, TaskflowValidationError } from "./taskflow.js";
 import { GitHubService, GitHubExportError } from "./github-service.js";
 import { AGENT_ROLES } from "./ai/contracts.js";
-import { AiProviderError } from "./ai/model-router.js";
 import { ApplicationService } from "./application-service.js";
-import { normalizeWorkspacePath } from "./workspace-paths.js";
+import { RepairService } from "./repair-service.js";
+import { AutonomousPipeline } from "./autonomous-pipeline.js";
+import { buildProjectContext, formatProjectContextForPrompt } from "./project-context.js";
 
 const DEFAULT_SECRET = "development-secret-change-me";
 
@@ -131,6 +132,37 @@ export function createApp(overrides = {}) {
   const github =
     overrides.github ??
     new GitHubService({ token: config.githubToken, apiBaseUrl: config.githubApiBaseUrl });
+  const repair =
+    overrides.repair ??
+    new RepairService({
+      workspaceService: workspace,
+      executionService: execution,
+      workforce: ai.workforce,
+      saveHistory: (project, entry) => {
+        store.updateProject(project.id, {
+          repairHistory: [...(project.repairHistory ?? []), entry].slice(-10),
+        });
+      },
+    });
+  const pipeline =
+    overrides.pipeline ??
+    new AutonomousPipeline({
+      ai,
+      workspaceService: workspace,
+      executionService: execution,
+      applicationService: applications,
+      repairService: repair,
+      saveRun: (projectId, summary) => {
+        const project = store.getProjectById(projectId);
+        if (!project) return;
+        store.updateProject(projectId, {
+          pipelineRuns: [
+            ...(project.pipelineRuns ?? []).filter((existing) => existing.id !== summary.id),
+            summary,
+          ].slice(-10),
+        });
+      },
+    });
   ai.toolRegistry.setTestRunner((args) => execution.runTests(args.projectId, args));
   const loginRateLimiter = new RateLimiter();
   const registerRateLimiter = new RateLimiter();
@@ -148,6 +180,8 @@ export function createApp(overrides = {}) {
     applications,
     taskflow,
     github,
+    repair,
+    pipeline,
     loginRateLimiter,
     registerRateLimiter,
     passwordResetRateLimiter,
@@ -175,6 +209,8 @@ export function createApp(overrides = {}) {
           taskflow,
           persistTaskflow,
           github,
+          repair,
+          pipeline,
           loginRateLimiter,
           registerRateLimiter,
           passwordResetRateLimiter,
@@ -216,6 +252,8 @@ async function handleRequest({
   taskflow,
   persistTaskflow,
   github,
+  repair,
+  pipeline,
   loginRateLimiter,
   registerRateLimiter,
   passwordResetRateLimiter,
@@ -363,7 +401,7 @@ async function handleRequest({
     return handleExecutionList({ request, store, execution, applications, requestId, path });
   }
   if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/executions\/stream$/.test(path)) {
-    return handleExecutionStream({ request, store, execution, applications, requestId, path });
+    return handleExecutionStream({ request, store, execution, applications, repair, pipeline, requestId, path });
   }
   if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/executions\/[^/]+$/.test(path)) {
     return handleExecutionGet({ request, store, execution, requestId, path });
@@ -390,7 +428,22 @@ async function handleRequest({
     return handlePreviewProxy({ request, store, applications, requestId, path });
   }
   if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/repair$/.test(path)) {
-    return handleWorkspaceRepair({ request, store, workspace, execution, ai, requestId, path });
+    return handleWorkspaceRepair({ request, store, repair, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/repair\/verify$/.test(path)) {
+    return handleRepairVerify({ request, store, repair, requestId, path });
+  }
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/context$/.test(path)) {
+    return handleProjectContext({ request, store, workspace, execution, requestId, path });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/pipeline\/run$/.test(path)) {
+    return handlePipelineRun({ request, store, pipeline, requestId, path });
+  }
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/pipeline\/runs$/.test(path)) {
+    return handlePipelineList({ request, store, pipeline, requestId, path });
+  }
+  if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/pipeline\/runs\/[^/]+$/.test(path)) {
+    return handlePipelineGet({ request, store, pipeline, requestId, path });
   }
   if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/debug$/.test(path)) {
     return handleWorkspaceDebug({ request, store, workspace, execution, ai, requestId, path });
@@ -1917,7 +1970,7 @@ async function handlePreviewProxy({ request, store, applications, requestId, pat
   return applications.proxy(preview, request);
 }
 
-async function handleExecutionStream({ request, store, execution, applications, requestId, path }) {
+async function handleExecutionStream({ request, store, execution, applications, repair, pipeline, requestId, path }) {
   const url = new URL(request.url);
   const token = url.searchParams.get("token") || bearerToken(request);
   if (!token) return jsonResponse(401, { error: { code: "UNAUTHORIZED", message: "Missing token", requestId } });
@@ -1939,8 +1992,12 @@ async function handleExecutionStream({ request, store, execution, applications, 
       send({ type: "execution_snapshot", timestamp: new Date().toISOString(), projectId, payload: { jobs: execution.listJobs(projectId), preview: applications.getPreview(projectId) } });
       const onExecution = (event) => { if (event.projectId === projectId) send(event); };
       const onPreview = (event) => { if (event.projectId === projectId) send(event); };
+      const onRepair = (event) => { if (event.projectId === projectId) send(event); };
+      const onPipeline = (event) => { if (event.projectId === projectId) send(event); };
       execution.on("event", onExecution);
       applications.on("event", onPreview);
+      repair.on("event", onRepair);
+      pipeline.on("event", onPipeline);
       const heartbeat = setInterval(() => write(": heartbeat\n\n"), 15000);
       heartbeat.unref?.();
       cleanup = () => {
@@ -1949,6 +2006,8 @@ async function handleExecutionStream({ request, store, execution, applications, 
         clearInterval(heartbeat);
         execution.off("event", onExecution);
         applications.off("event", onPreview);
+        repair.off("event", onRepair);
+        pipeline.off("event", onPipeline);
       };
       request.signal.addEventListener("abort", cleanup, { once: true });
     },
@@ -1965,55 +2024,105 @@ async function handleExecutionStream({ request, store, execution, applications, 
   });
 }
 
-async function handleWorkspaceRepair({ request, store, workspace, execution, ai, requestId, path }) {
+async function handleWorkspaceRepair({ request, store, repair, requestId, path }) {
   const projectId = workspaceProjectId(path);
   const access = requireProjectAccess(request, store, projectId, requestId);
   if ("error" in access) return access.error;
   try {
     const body = await parseJsonBody(request);
-    const job = execution.getJob(projectId, String(body.jobId ?? ""));
-    if (!job?.result) return jsonResponse(404, { error: { code: "EXECUTION_NOT_FOUND", message: "A completed execution job is required for repair", requestId } });
-    const filePath = body.filePath ? normalizeWorkspacePath(String(body.filePath)) : null;
-    const file = filePath ? workspace.read(projectId, filePath) : null;
-    const role = filePath && /\.(tsx|jsx|css|html)$/i.test(filePath) ? AGENT_ROLES.FRONTEND_ENGINEER : AGENT_ROLES.BACKEND_ENGINEER;
-    let meta = null;
-    const output = await ai.workforce.getAgent(role).execute({
-      workflowId: `repair_${job.id}`,
-      projectId,
-      taskId: `repair_${randomUUID()}`,
-      taskTitle: "Diagnose a real execution failure and propose a minimal repair",
-      context: {
-        project: { id: projectId, name: access.project.name, description: access.project.description },
-        failure: {
-          command: job.command,
-          exitCode: job.result.exitCode,
-          stdout: String(job.result.stdout ?? "").slice(-12000),
-          stderr: String(job.result.stderr ?? "").slice(-12000),
-          timedOut: job.result.timedOut ?? false,
-        },
-        selectedFile: file ? { path: file.path, content: file.content } : null,
-        workspaceFiles: workspace.list(projectId).map((artifact) => artifact.path),
-        instruction: "Return complete replacement files only for changes needed to fix the observed failure. Do not claim the repair has been tested.",
-      },
-      onMeta: (value) => { meta = value; },
-    });
-    const files = output.artifacts.map((artifact) => ({ ...artifact, path: normalizeWorkspacePath(artifact.path) }));
-    return jsonResponse(200, {
-      summary: output.summary,
-      files,
-      decisions: output.decisions,
-      basedOnJobId: job.id,
-      provider: meta?.provider,
-      model: meta?.model,
-      simulated: meta?.provider === "mock",
-      verified: false,
-    }, { "x-correlation-id": requestId });
+    const proposal = await repair.propose({ project: access.project, jobId: body.jobId, filePath: body.filePath ?? null });
+    return jsonResponse(200, proposal, { "x-correlation-id": requestId });
   } catch (error) {
-    if (error instanceof AiProviderError) {
-      return jsonResponse(error.code === "AI_NOT_CONFIGURED" ? 503 : 502, { error: { code: error.code, message: error.message, requestId } });
+    const providerError = RepairService.providerErrorResponse(error, requestId);
+    if (providerError) return jsonResponse(providerError.status, providerError.body);
+    if (error.status === 404) {
+      return jsonResponse(404, { error: { code: "EXECUTION_NOT_FOUND", message: error.message, requestId } });
     }
     return workspaceErrorResponse(error, requestId);
   }
+}
+
+async function handleRepairVerify({ request, store, repair, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  try {
+    const body = await parseJsonBody(request);
+    const files = Array.isArray(body.files) ? body.files : null;
+    if (!files?.length) {
+      return jsonResponse(400, { error: { code: "NO_FILES", message: "Pass the reviewed files to apply", requestId } });
+    }
+    if (!Array.isArray(body.command) || !body.command.length || body.command.length > 64) {
+      return jsonResponse(400, { error: { code: "INVALID_COMMAND", message: "Pass the command array to rerun for verification", requestId } });
+    }
+    const verification = await repair.applyAndVerify({
+      project: access.project,
+      files: files.map((file) => ({ path: String(file.path), content: String(file.content) })),
+      command: body.command.map(String),
+      maxRounds: body.maxRounds ?? 1,
+      verifyTimeoutMs: body.verifyTimeoutMs ?? 120000,
+      createdBy: "user-verified-repair",
+    });
+    return jsonResponse(200, verification, { "x-correlation-id": requestId });
+  } catch (error) {
+    const providerError = RepairService.providerErrorResponse(error, requestId);
+    if (providerError) return jsonResponse(providerError.status, providerError.body);
+    if (error.status === 400 || error.status === 404) {
+      return jsonResponse(error.status, { error: { code: "REPAIR_INVALID", message: error.message, requestId } });
+    }
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handleProjectContext({ request, store, workspace, execution, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  const context = buildProjectContext({
+    workspaceService: workspace,
+    executionService: execution,
+    project: access.project,
+  });
+  return jsonResponse(200, { ...context, promptDigest: formatProjectContextForPrompt(context) }, { "x-correlation-id": requestId });
+}
+
+async function handlePipelineRun({ request, store, pipeline, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  let options = {};
+  try {
+    const body = await parseJsonBody(request);
+    options = body && typeof body === "object" ? body : {};
+  } catch {
+    options = {};
+  }
+  try {
+    const run = pipeline.start({ project: access.project, options });
+    return jsonResponse(202, { run }, { "x-correlation-id": requestId });
+  } catch (error) {
+    if (error.status === 409) {
+      return jsonResponse(409, { error: { code: "PIPELINE_ALREADY_RUNNING", message: error.message, requestId } });
+    }
+    return workspaceErrorResponse(error, requestId);
+  }
+}
+
+async function handlePipelineList({ request, store, pipeline, requestId, path }) {
+  const projectId = workspaceProjectId(path);
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  return jsonResponse(200, { runs: pipeline.listRuns(projectId) }, { "x-correlation-id": requestId });
+}
+
+async function handlePipelineGet({ request, store, pipeline, requestId, path }) {
+  const parts = path.split("/");
+  const projectId = parts[4];
+  const access = requireProjectAccess(request, store, projectId, requestId);
+  if ("error" in access) return access.error;
+  const run = pipeline.getRun(projectId, parts[7]);
+  if (!run) return jsonResponse(404, { error: { code: "PIPELINE_RUN_NOT_FOUND", message: "Autonomous run not found", requestId } });
+  return jsonResponse(200, { run }, { "x-correlation-id": requestId });
 }
 
 async function handleWorkspaceDebug({ request, store, workspace, execution, ai, requestId, path }) {
