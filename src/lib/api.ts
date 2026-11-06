@@ -30,12 +30,30 @@ export type ApiResponse<T> = {
 const STORAGE_KEY = "helix_session";
 const DEFAULT_BASE_URL = "http://localhost:3001";
 
+/**
+ * Cookie-session mode (opt-in at build time with VITE_COOKIE_SESSIONS=true, paired with
+ * HELIX_COOKIE_SESSIONS=true on the backend). The session credential then lives in an
+ * httpOnly cookie the page cannot read: requests authenticate through
+ * `credentials: "include"` instead of an Authorization header, and no token is ever
+ * written to localStorage (nothing for a script injection to exfiltrate).
+ */
+export const COOKIE_SESSIONS = import.meta.env["VITE_COOKIE_SESSIONS"] === "true";
+
+/**
+ * Opaque marker returned by getStoredSessionToken() in cookie-session mode. It is never a
+ * secret — it only signals "the httpOnly cookie is the credential" so existing signed-in
+ * guards (`if (!token)`) keep working after a page reload, when no in-memory token exists.
+ * authHeaders() strips it before any request is sent; the server decides session validity.
+ */
+const COOKIE_SESSION_CREDENTIAL = "__helix_cookie_session__";
+
 function getBaseUrl() {
   return (import.meta.env["VITE_API_BASE_URL"] ?? DEFAULT_BASE_URL).replace(/\/$/, "");
 }
 
 export function getStoredSessionToken() {
   if (typeof window === "undefined") return null;
+  if (COOKIE_SESSIONS) return COOKIE_SESSION_CREDENTIAL;
 
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
@@ -50,6 +68,13 @@ export function getStoredSessionToken() {
 export function setStoredSessionToken(token: string | null) {
   if (typeof window === "undefined") return;
 
+  if (COOKIE_SESSIONS) {
+    // Cookie-session mode: never persist a session token client-side. Also wipe any
+    // legacy localStorage entry so switching modes cannot resurrect a stale token.
+    window.localStorage.removeItem(STORAGE_KEY);
+    return;
+  }
+
   if (!token) {
     window.localStorage.removeItem(STORAGE_KEY);
     return;
@@ -58,11 +83,20 @@ export function setStoredSessionToken(token: string | null) {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ token }));
 }
 
+/**
+ * Authorization header for a session credential. In cookie-session mode — or when no
+ * token is available — no Authorization header is sent; the httpOnly cookie attached by
+ * `credentials: "include"` authenticates the request instead.
+ */
+export const authHeaders = (token?: string | null): Record<string, string> =>
+  !COOKIE_SESSIONS && token ? { Authorization: `Bearer ${token}` } : {};
+
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const url = `${getBaseUrl()}${path}`;
   const isFormData = typeof FormData !== "undefined" && init.body instanceof FormData;
   const response = await fetch(url, {
     ...init,
+    credentials: COOKIE_SESSIONS ? "include" : "same-origin",
     headers: {
       ...(isFormData ? {} : { "content-type": "application/json" }),
       ...(init.headers ?? {}),
@@ -149,9 +183,7 @@ export async function createProject(
   }>("/api/v1/projects", {
     method: "POST",
     body: JSON.stringify(payload),
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
+    headers: authHeaders(token),
   });
 }
 
@@ -176,7 +208,7 @@ export async function analyzeProject(
   return apiRequest<ProjectAnalysis>("/api/v1/projects/analyze", {
     method: "POST",
     body: JSON.stringify(payload),
-    headers: { Authorization: `Bearer ${token}` },
+    headers: authHeaders(token),
   });
 }
 
@@ -190,7 +222,7 @@ export async function sendVoiceTurn(
   return apiRequest<{ reply: string }>("/api/v1/voice/turn", {
     method: "POST",
     body: JSON.stringify(payload),
-    headers: { Authorization: `Bearer ${token}` },
+    headers: authHeaders(token),
   });
 }
 
@@ -201,7 +233,7 @@ export async function transcribeVoiceNote(file: Blob, token: string) {
   return apiRequest<{ transcript: string }>("/api/v1/voice/transcribe", {
     method: "POST",
     body: formData,
-    headers: { Authorization: `Bearer ${token}` },
+    headers: authHeaders(token),
   });
 }
 
@@ -214,7 +246,7 @@ export async function extractProjectDocument(file: File, token: string) {
     {
       method: "POST",
       body: formData,
-      headers: { Authorization: `Bearer ${token}` },
+      headers: authHeaders(token),
     },
   );
 }
@@ -222,7 +254,7 @@ export async function extractProjectDocument(file: File, token: string) {
 export async function deleteProject(projectId: string, token: string) {
   return apiRequest<{ message: string; id: string }>(`/api/v1/projects/${projectId}`, {
     method: "DELETE",
-    headers: { Authorization: `Bearer ${token}` },
+    headers: authHeaders(token),
   });
 }
 
@@ -239,9 +271,7 @@ export async function listProjects(token: string) {
     }>
   >("/api/v1/projects", {
     method: "GET",
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
+    headers: authHeaders(token),
   });
 }
 
@@ -265,7 +295,7 @@ export async function getDashboard(token: string) {
     };
   }>("/api/v1/dashboard", {
     method: "GET",
-    headers: { Authorization: `Bearer ${token}` },
+    headers: authHeaders(token),
   });
 }
 
@@ -565,8 +595,6 @@ export type CurrentUser = {
   createdAt: string;
 };
 
-const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}` });
-
 export async function startProjectWorkflow(
   projectId: string,
   token: string,
@@ -661,7 +689,7 @@ export async function updateProject(
   });
 }
 
-export async function getCurrentUser(token: string) {
+export async function getCurrentUser(token?: string | null) {
   return apiRequest<{ user: CurrentUser; session: { expiresAt: string; rememberMe: boolean } }>(
     "/api/v1/auth/me",
     {
@@ -691,13 +719,17 @@ export async function logout() {
   const token = getStoredSessionToken();
   setStoredSessionToken(null);
   if (typeof window !== "undefined") window.sessionStorage.removeItem("helix_active_project_id");
-  if (!token) return;
+  // In cookie-session mode the server must always be called so the httpOnly cookie is
+  // cleared — there is no client-side token to inspect.
+  if (!token && !COOKIE_SESSIONS) return;
   await apiRequest("/api/v1/auth/logout", { method: "POST", headers: authHeaders(token) }).catch(
     () => null,
   );
 }
 
 export type SystemHealth = {
+  ok?: boolean;
+  service?: string;
   status: string;
   environment: string;
   storage: string;
@@ -708,6 +740,34 @@ export type SystemHealth = {
     configuredProviders: string[];
     mockFallbackAllowed: boolean;
   } | null;
+  /**
+   * Detailed readiness reported by the backend's /api/v1/health (Stage 2+). The legacy
+   * fields above stay stable for existing consumers; this block carries the depth.
+   */
+  readiness?: {
+    storage: {
+      mode?: string;
+      pendingWrites?: number;
+      lastWriteError?: string | null;
+    };
+    execution: {
+      available?: boolean | null;
+      reason?: string | null;
+      active?: number | null;
+      trackedJobs?: number | null;
+      maxConcurrent?: number | null;
+    };
+    providers: SystemHealth["ai"];
+    recovery: {
+      hydratedExecutionJobs: number;
+      interruptedExecutionJobs: number;
+      hydratedPipelineRuns: number;
+      interruptedPipelineRuns: number;
+      recoveredAt: string;
+    } | null;
+  };
+  uptimeSeconds?: number;
+  timestamp?: string;
 };
 
 export async function getSystemHealth() {
@@ -729,8 +789,13 @@ export function subscribeToProjectEvents(
   token: string,
   handlers: { onEvent: (event: WorkflowEvent) => void; onStatus?: (connected: boolean) => void },
 ) {
-  const url = `${getBaseUrl()}/api/v1/projects/${projectId}/workflows/stream?token=${encodeURIComponent(token)}`;
-  const source = new EventSource(url);
+  // Cookie-session mode: the stream authenticates via the httpOnly cookie (withCredentials)
+  // and no token is embedded in the URL. Bearer mode keeps the query-param flow the
+  // EventSource API requires (it cannot send headers).
+  const url = COOKIE_SESSIONS
+    ? `${getBaseUrl()}/api/v1/projects/${projectId}/workflows/stream`
+    : `${getBaseUrl()}/api/v1/projects/${projectId}/workflows/stream?token=${encodeURIComponent(token)}`;
+  const source = new EventSource(url, COOKIE_SESSIONS ? { withCredentials: true } : undefined);
   source.onopen = () => handlers.onStatus?.(true);
   source.onerror = () => handlers.onStatus?.(false);
   source.onmessage = (message) => {
@@ -1119,8 +1184,11 @@ export function subscribeToExecutionEvents(
   token: string,
   handlers: { onEvent: (event: ExecutionEvent) => void; onStatus?: (connected: boolean) => void },
 ) {
-  const url = `${getBaseUrl()}/api/v1/projects/${projectId}/executions/stream?token=${encodeURIComponent(token)}`;
-  const source = new EventSource(url);
+  // Same cookie/bearer split as subscribeToProjectEvents above.
+  const url = COOKIE_SESSIONS
+    ? `${getBaseUrl()}/api/v1/projects/${projectId}/executions/stream`
+    : `${getBaseUrl()}/api/v1/projects/${projectId}/executions/stream?token=${encodeURIComponent(token)}`;
+  const source = new EventSource(url, COOKIE_SESSIONS ? { withCredentials: true } : undefined);
   source.onopen = () => handlers.onStatus?.(true);
   source.onerror = () => handlers.onStatus?.(false);
   source.onmessage = (message) => {

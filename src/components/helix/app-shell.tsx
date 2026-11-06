@@ -43,6 +43,9 @@ export function AppShell({
 
   useEffect(() => {
     const token = getStoredSessionToken();
+    // In cookie-session mode this returns an opaque marker (the credential lives in an
+    // httpOnly cookie), so the probe below authenticates via the cookie; if it is absent
+    // or expired the server answers 401 and we fall through to the login redirect.
     if (!token) return;
     getCurrentUser(token)
       .then((res) => setUser(res.user))
