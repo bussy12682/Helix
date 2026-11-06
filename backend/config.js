@@ -10,6 +10,18 @@ export function loadConfig(env = process.env) {
     logLevel: ["debug", "info", "warn", "error"].includes(env.HELIX_LOG_LEVEL)
       ? env.HELIX_LOG_LEVEL
       : "info",
+    // Operational governance: daily AI token budgets (0 = unlimited), AI route
+    // rate limiting, per-project execution concurrency, and the production
+    // autonomous-approval policy.
+    userDailyTokenLimit: Math.max(0, Number(env.HELIX_USER_DAILY_TOKEN_LIMIT ?? 2_000_000)),
+    projectDailyTokenLimit: Math.max(0, Number(env.HELIX_PROJECT_DAILY_TOKEN_LIMIT ?? 4_000_000)),
+    aiRateLimitMax: Math.max(1, Number(env.HELIX_AI_RATE_LIMIT_MAX ?? 40)),
+    aiRateLimitWindowMs: Math.max(
+      1000,
+      Number(env.HELIX_AI_RATE_LIMIT_WINDOW_MS ?? 15 * 60 * 1000),
+    ),
+    maxActiveJobsPerProject: Math.max(1, Number(env.HELIX_MAX_ACTIVE_JOBS_PER_PROJECT ?? 25)),
+    autonomousAutoApprove: env.HELIX_AUTONOMOUS_AUTO_APPROVE === "true",
     storagePath: env.HELIX_STORAGE_PATH ?? ".data/helix-state.json",
     workspaceRoot: env.HELIX_WORKSPACE_ROOT ?? ".data/workspaces",
     databaseUrl,

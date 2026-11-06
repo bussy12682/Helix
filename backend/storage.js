@@ -13,6 +13,8 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
   const taskflows = new Map();
   const executionJobs = new Map();
   const pipelineRuns = new Map();
+  const budgetUsage = new Map();
+  const auditEvents = new Map();
   let persistTimer = null;
 
   // Atomic write: serialize to a temp file then rename so a crash never leaves a truncated state file.
@@ -35,6 +37,8 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
       taskflows: [...taskflows.values()],
       executionJobs: [...executionJobs.values()],
       pipelineRuns: [...pipelineRuns.values()],
+      budgetUsage: [...budgetUsage.values()],
+      auditEvents: [...auditEvents.values()].slice(-1000),
     };
     mkdirSync(dirname(storagePath), { recursive: true });
     const tempPath = `${storagePath}.${process.pid}.tmp`;
@@ -74,6 +78,9 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
       for (const plan of state.taskflows ?? []) taskflows.set(plan.id, plan);
       for (const job of state.executionJobs ?? []) executionJobs.set(job.id, job);
       for (const run of state.pipelineRuns ?? []) pipelineRuns.set(run.id, run);
+      for (const record of state.budgetUsage ?? [])
+        budgetUsage.set(record.key ?? record.scopeKey, record);
+      for (const event of state.auditEvents ?? []) auditEvents.set(event.id, event);
     } catch (error) {
       console.error(
         `[storage] Could not read ${storagePath}; starting with an empty store.`,
@@ -310,6 +317,37 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
     return [...pipelineRuns.values()].map((run) => structuredClone(run));
   }
 
+  function saveBudgetUsage(record) {
+    budgetUsage.set(record.key ?? record.scopeKey, structuredClone(record));
+    persistSoon();
+    return record;
+  }
+
+  function deleteBudgetUsage(key) {
+    return budgetUsage.delete(key);
+  }
+
+  function saveAuditEvent(event) {
+    auditEvents.set(event.id, structuredClone(event));
+    // Keep the persisted audit trail bounded; drop the oldest beyond 1000.
+    if (auditEvents.size > 1000) {
+      const ordered = [...auditEvents.values()].sort((a, b) =>
+        a.createdAt.localeCompare(b.createdAt),
+      );
+      for (const stale of ordered.slice(0, ordered.length - 1000)) auditEvents.delete(stale.id);
+    }
+    persistSoon();
+    return event;
+  }
+
+  function deleteAuditEvent(id) {
+    return auditEvents.delete(id);
+  }
+
+  function listAuditEvents() {
+    return [...auditEvents.values()].map((event) => structuredClone(event));
+  }
+
   function listProjectsForUser(userId) {
     return [...projects.values()].filter((project) => project.ownerId === userId);
   }
@@ -379,6 +417,8 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
     workflows,
     executionJobs,
     pipelineRuns,
+    budgetUsage,
+    auditEvents,
     mode: storagePath === ":memory:" ? "memory" : "file",
     nextId,
     persist,
@@ -401,6 +441,11 @@ export function createMemoryStore({ storagePath = ":memory:" } = {}) {
     savePipelineRun,
     deletePipelineRun,
     listPipelineRuns,
+    saveBudgetUsage,
+    deleteBudgetUsage,
+    saveAuditEvent,
+    deleteAuditEvent,
+    listAuditEvents,
     createUser,
     getUserByEmail,
     getUserById,

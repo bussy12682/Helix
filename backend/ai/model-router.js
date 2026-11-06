@@ -77,8 +77,14 @@ export class ModelRouter {
       (process.env.HELIX_ALLOW_MOCK_FALLBACK
         ? process.env.HELIX_ALLOW_MOCK_FALLBACK === "true"
         : process.env.NODE_ENV !== "production");
-    this.maxRetries = Math.max(0, Math.min(5, Number(config.aiMaxRetries ?? process.env.AI_MAX_RETRIES ?? 2) || 0));
-    this.timeoutMs = Math.max(1, Number(config.aiTimeoutMs ?? process.env.AI_TIMEOUT_MS ?? 120000) || 120000);
+    this.maxRetries = Math.max(
+      0,
+      Math.min(5, Number(config.aiMaxRetries ?? process.env.AI_MAX_RETRIES ?? 2) || 0),
+    );
+    this.timeoutMs = Math.max(
+      1,
+      Number(config.aiTimeoutMs ?? process.env.AI_TIMEOUT_MS ?? 120000) || 120000,
+    );
     this.retryBaseDelayMs = Math.max(0, Number(config.aiRetryBaseDelayMs ?? 0) || 0);
     this.fetchImpl = config.fetchImpl ?? ((...args) => fetch(...args));
   }
@@ -111,7 +117,9 @@ export class ModelRouter {
     const provider = options.provider || this.defaultProvider;
 
     let modelName =
-      options.model || (provider === this.defaultProvider ? this.config.aiModel : "") || "gemini-2.5-flash";
+      options.model ||
+      (provider === this.defaultProvider ? this.config.aiModel : "") ||
+      "gemini-2.5-flash";
 
     if (provider === "google") {
       if (tier === MODEL_TIERS.REASONING)
@@ -125,10 +133,8 @@ export class ModelRouter {
         modelName = this.config.openAiCodingModel || "gpt-4o-mini";
       else modelName = this.config.openAiFastModel || "gpt-4o-mini";
     } else if (provider === "xai") {
-      if (tier === MODEL_TIERS.REASONING)
-        modelName = this.config.xaiReasoningModel || "grok-3";
-      else if (tier === MODEL_TIERS.CODING)
-        modelName = this.config.xaiCodingModel || "grok-3-mini";
+      if (tier === MODEL_TIERS.REASONING) modelName = this.config.xaiReasoningModel || "grok-3";
+      else if (tier === MODEL_TIERS.CODING) modelName = this.config.xaiCodingModel || "grok-3-mini";
       else modelName = this.config.xaiFastModel || "grok-3-mini";
     } else if (provider === "ollama") {
       if (tier === MODEL_TIERS.REASONING)
@@ -178,11 +184,37 @@ export class ModelRouter {
   }
 
   /**
+   * Operational usage policy (token budgets). When set, every real provider
+   * call is authorized before dispatch and accounted after with the
+   * provider-reported usage. Mock output is free and never counted.
+   */
+  setUsagePolicy(policy) {
+    this.usagePolicy = policy;
+  }
+
+  /**
    * Invokes a completion with role-based routing, per-provider retries with exponential backoff,
    * timeouts, cancellation (options.signal), optional token streaming (options.onToken), and an
    * explicit fallback provider chain (AI_FALLBACK_PROVIDERS).
    */
   async complete({ agentRole, messages, temperature = 0.2, options = {} }) {
+    const policy = this.usagePolicy;
+    // Mock output is free: budgets neither gate nor account simulated calls.
+    if (!policy || this.mockMode || options.forceMock) {
+      return this.completeInternal({ agentRole, messages, temperature, options });
+    }
+    const usageContext = policy.enrich
+      ? policy.enrich(options.usageContext ?? {})
+      : (options.usageContext ?? {});
+    policy.authorize?.(usageContext);
+    const result = await this.completeInternal({ agentRole, messages, temperature, options });
+    if (result?.provider && result.provider !== "mock" && result.usage) {
+      policy.record?.(usageContext, result);
+    }
+    return result;
+  }
+
+  async completeInternal({ agentRole, messages, temperature = 0.2, options = {} }) {
     if (this.mockMode || options.forceMock) {
       return this.emitMock(this.generateMockResponse(agentRole, messages), options);
     }
@@ -510,7 +542,13 @@ export class ModelRouter {
           },
         ],
         dependencies: ["TASK-001"],
-        risks: [{ description: "The fixture has no persistence or authentication and is not a production application", severity: "medium" }],
+        risks: [
+          {
+            description:
+              "The fixture has no persistence or authentication and is not a production application",
+            severity: "medium",
+          },
+        ],
         next_actions: [AGENT_ROLES.DATABASE_ENGINEER, AGENT_ROLES.FRONTEND_ENGINEER],
       },
 
@@ -549,19 +587,23 @@ export class ModelRouter {
             name: "package.json",
             type: "config",
             path: "package.json",
-            content: JSON.stringify({
-              name: "helix-offline-starter",
-              version: "1.0.0",
-              private: true,
-              description: "Explicitly simulated HELIX starter application",
-              scripts: {
-                dev: "node server.js",
-                start: "node server.js",
-                build: "node scripts/build.js",
-                test: "node --test tests/*.test.js",
+            content: JSON.stringify(
+              {
+                name: "helix-offline-starter",
+                version: "1.0.0",
+                private: true,
+                description: "Explicitly simulated HELIX starter application",
+                scripts: {
+                  dev: "node server.js",
+                  start: "node server.js",
+                  build: "node scripts/build.js",
+                  test: "node --test tests/*.test.js",
+                },
+                engines: { node: ">=22" },
               },
-              engines: { node: ">=22" },
-            }, null, 2),
+              null,
+              2,
+            ),
           },
           {
             name: "server.js",
@@ -654,12 +696,17 @@ export class ModelRouter {
           {
             key: "network_exposure",
             decision: "Loopback by default; explicit container exposure",
-            rationale: "The public fixture has no authentication and must not be exposed unintentionally",
+            rationale:
+              "The public fixture has no authentication and must not be exposed unintentionally",
           },
         ],
         dependencies: ["TASK-004"],
         risks: [
-          { description: "Do not deploy the unauthenticated fixture as a private production service", severity: "medium" },
+          {
+            description:
+              "Do not deploy the unauthenticated fixture as a private production service",
+            severity: "medium",
+          },
         ],
         next_actions: [AGENT_ROLES.DEVOPS_ENGINEER],
       },
@@ -805,7 +852,8 @@ export class ModelRouter {
       const matchIndex = lines.findIndex((line) => throwLine.test(line));
       if (matchIndex >= 0) {
         const match = lines[matchIndex].match(throwLine);
-        lines[matchIndex] = `${match[1]}// Offline repair draft: replaced an unconditional throw with a handled failure report.\n${match[1]}console.error("Handled previously thrown failure:", ${match[2]});`;
+        lines[matchIndex] =
+          `${match[1]}// Offline repair draft: replaced an unconditional throw with a handled failure report.\n${match[1]}console.error("Handled previously thrown failure:", ${match[2]});`;
         artifacts.push({
           name: selectedFile.path.split("/").pop(),
           type: "file",
@@ -834,13 +882,19 @@ export class ModelRouter {
       decisions: [
         {
           key: "repair_strategy",
-          decision: artifacts[0].path.endsWith(".md") ? "analysis-only" : "minimal-file-replacement",
+          decision: artifacts[0].path.endsWith(".md")
+            ? "analysis-only"
+            : "minimal-file-replacement",
           rationale: "Deterministic offline draft derived from the captured failure output",
         },
       ],
       dependencies: [],
       risks: [
-        { description: "Simulated offline draft: the proposal was not executed or verified by HELIX.", severity: "medium" },
+        {
+          description:
+            "Simulated offline draft: the proposal was not executed or verified by HELIX.",
+          severity: "medium",
+        },
       ],
       next_actions: [],
     };

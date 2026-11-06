@@ -22,6 +22,7 @@ import { RepairService } from "./repair-service.js";
 import { AutonomousPipeline } from "./autonomous-pipeline.js";
 import { buildProjectContext, formatProjectContextForPrompt } from "./project-context.js";
 import { createLogger } from "./logger.js";
+import { TokenBudgetService, AuditLog, BudgetExceededError } from "./operational-governance.js";
 
 const DEFAULT_SECRET = "development-secret-change-me";
 
@@ -127,6 +128,11 @@ export function createApp(overrides = {}) {
   // Persistent stores hydrate asynchronously; rebind once state is recovered so
   // the AI subsystem (workspaces, traces) sees the hydrated data.
   if (store.ready) store.ready.then(() => bindAiToStore(ai, store)).catch(() => {});
+  // Production approval policy: autonomous runs auto-approve human gates.
+  // Allowed by default outside production; in production it must be explicitly
+  // enabled via HELIX_AUTONOMOUS_AUTO_APPROVE=true.
+  const autoApproveEnabled =
+    config.nodeEnv !== "production" || config.autonomousAutoApprove === true;
   const workspace =
     overrides.workspace ??
     new WorkspaceService({ root: config.workspaceRoot, contextManager: ai.contextManager });
@@ -135,6 +141,7 @@ export function createApp(overrides = {}) {
     new ExecutionService({
       workspaceService: workspace,
       maxConcurrent: config.executionMaxConcurrent,
+      maxActiveJobsPerProject: config.maxActiveJobsPerProject,
       persistence: {
         saveJob: (job) => store.saveExecutionJob?.(job),
         deleteJob: (id) => store.deleteExecutionJob?.(id),
@@ -189,11 +196,96 @@ export function createApp(overrides = {}) {
         saveRunRecord: (run) => store.savePipelineRun?.(run),
         deleteRunRecord: (id) => store.deletePipelineRun?.(id),
       },
+      // Production approval policy: autonomous runs auto-approve human gates.
+      // Outside production this is allowed by default; in production it must be
+      // explicitly enabled via HELIX_AUTONOMOUS_AUTO_APPROVE=true.
+      autoApproveEnabled,
     });
   ai.toolRegistry.setTestRunner((args) => execution.runTests(args.projectId, args));
   const loginRateLimiter = new RateLimiter();
   const registerRateLimiter = new RateLimiter();
   const passwordResetRateLimiter = new RateLimiter();
+  const aiRateLimiter = new RateLimiter();
+
+  // Operational governance: durable token budgets, redacted audit trail, and
+  // the production autonomous-approval policy.
+  const budgets =
+    overrides.budgets ??
+    new TokenBudgetService({
+      store,
+      userDailyTokenLimit: config.userDailyTokenLimit,
+      projectDailyTokenLimit: config.projectDailyTokenLimit,
+      logger,
+    });
+  const audit = overrides.audit ?? new AuditLog({ store });
+
+  // Enforce budgets at the model-router boundary: authorize before every real
+  // provider call, account actual usage after. Mock output is free and skipped.
+  ai.modelRouter?.setUsagePolicy?.({
+    enrich: (context = {}) => ({
+      ...context,
+      userId:
+        context.userId ??
+        (context.projectId ? store.getProjectById(context.projectId)?.ownerId : undefined),
+    }),
+    authorize: (context) => {
+      try {
+        budgets.authorize(context);
+      } catch (error) {
+        if (error instanceof BudgetExceededError) {
+          audit.record({
+            type: "governance.budget_exceeded",
+            userId: context.userId ?? null,
+            projectId: context.projectId ?? null,
+            outcome: "rejected",
+            details: { scope: error.scope, used: error.used, limit: error.limit },
+          });
+        }
+        throw error;
+      }
+    },
+    record: (context, result) => {
+      budgets.record({
+        userId: context.userId ?? null,
+        projectId: context.projectId ?? null,
+        provider: result.provider ?? null,
+        model: result.model ?? null,
+        usage: result.usage ?? null,
+      });
+    },
+  });
+
+  // Audit significant lifecycle events without touching every handler: the
+  // execution service and pipeline already emit structured events.
+  execution.on?.("event", (event) => {
+    if (event.type === "execution_queued" || event.type === "execution_completed") {
+      audit.record({
+        type: `execution.${event.type === "execution_queued" ? "started" : "completed"}`,
+        userId: store.getProjectById(event.projectId)?.ownerId ?? null,
+        projectId: event.projectId,
+        details: {
+          jobId: event.payload?.job?.id,
+          kind: event.payload?.job?.kind,
+          status: event.payload?.job?.status,
+        },
+      });
+    }
+  });
+  pipeline.on?.("event", (event) => {
+    if (["pipeline_started", "pipeline_completed", "pipeline_failed"].includes(event.type)) {
+      audit.record({
+        type: `pipeline.${event.type.replace("pipeline_", "")}`,
+        userId: store.getProjectById(event.projectId)?.ownerId ?? null,
+        projectId: event.projectId,
+        outcome: event.type === "pipeline_failed" ? "failure" : "success",
+        details: {
+          runId: event.payload?.runId,
+          status: event.payload?.status,
+          error: event.payload?.error ?? null,
+        },
+      });
+    }
+  });
 
   // Initialize email service
   initializeEmailService(config);
@@ -203,6 +295,8 @@ export function createApp(overrides = {}) {
     store,
     ai,
     logger,
+    budgets,
+    audit,
     workspace,
     execution,
     applications,
@@ -241,6 +335,9 @@ export function createApp(overrides = {}) {
           repair,
           pipeline,
           recovery: () => app.recovery,
+          budgets,
+          audit,
+          aiRateLimiter,
           loginRateLimiter,
           registerRateLimiter,
           passwordResetRateLimiter,
@@ -344,6 +441,9 @@ async function handleRequest({
   repair,
   pipeline,
   recovery,
+  budgets,
+  audit,
+  aiRateLimiter,
   loginRateLimiter,
   registerRateLimiter,
   passwordResetRateLimiter,
@@ -401,6 +501,31 @@ async function handleRequest({
     return handleGetMe({ request, store, requestId });
   }
 
+  // Operational governance: self-service spend summary and audit trail.
+  if (request.method === "GET" && path === "/api/v1/usage") {
+    const auth = requireAuth(request, store);
+    if ("error" in auth) return auth.error;
+    const url = new URL(request.url);
+    const projectId = url.searchParams.get("projectId");
+    return jsonResponse(
+      200,
+      { usage: budgets.getSummary({ userId: auth.user.id, projectId }) },
+      { "x-correlation-id": requestId },
+    );
+  }
+
+  if (request.method === "GET" && path === "/api/v1/audit") {
+    const auth = requireAuth(request, store);
+    if ("error" in auth) return auth.error;
+    const url = new URL(request.url);
+    const limit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit") ?? 50) || 50));
+    return jsonResponse(
+      200,
+      { events: audit.listForUser(auth.user.id, { limit }) },
+      { "x-correlation-id": requestId },
+    );
+  }
+
   if (request.method === "PATCH" && path === "/api/v1/auth/me") {
     return handleUpdateMe({ request, store, requestId });
   }
@@ -414,11 +539,11 @@ async function handleRequest({
   }
 
   if (request.method === "POST" && path === "/api/v1/auth/register") {
-    return handleRegister({ request, config, store, registerRateLimiter, requestId });
+    return handleRegister({ request, config, store, registerRateLimiter, audit, requestId });
   }
 
   if (request.method === "POST" && path === "/api/v1/auth/login") {
-    return handleLogin({ request, config, store, loginRateLimiter, requestId });
+    return handleLogin({ request, config, store, loginRateLimiter, audit, requestId });
   }
 
   if (request.method === "POST" && path === "/api/v1/auth/demo") {
@@ -460,19 +585,35 @@ async function handleRequest({
   }
 
   if (request.method === "POST" && path === "/api/v1/projects") {
-    return handleCreateProject({ request, store, requestId });
+    return handleCreateProject({ request, store, audit, requestId });
   }
 
   if (request.method === "POST" && path === "/api/v1/projects/analyze") {
-    return handleAnalyzeProject({ request, config, store, requestId });
+    return handleAnalyzeProject({
+      request,
+      config,
+      store,
+      requestId,
+      budgets,
+      audit,
+      aiRateLimiter,
+    });
   }
 
   if (request.method === "POST" && path === "/api/v1/voice/turn") {
-    return handleVoiceTurn({ request, config, store, requestId });
+    return handleVoiceTurn({ request, config, store, requestId, budgets, audit, aiRateLimiter });
   }
 
   if (request.method === "POST" && path === "/api/v1/voice/transcribe") {
-    return handleVoiceTranscription({ request, config, store, requestId });
+    return handleVoiceTranscription({
+      request,
+      config,
+      store,
+      requestId,
+      budgets,
+      audit,
+      aiRateLimiter,
+    });
   }
 
   if (request.method === "POST" && path === "/api/v1/projects/extract-document") {
@@ -481,7 +622,17 @@ async function handleRequest({
 
   // AI Workflow and Office routes
   if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/workflows$/.test(path)) {
-    return handleStartProjectWorkflow({ request, store, ai, requestId, path });
+    return handleStartProjectWorkflow({
+      request,
+      store,
+      ai,
+      requestId,
+      path,
+      config,
+      budgets,
+      audit,
+      aiRateLimiter,
+    });
   }
 
   if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/workflows\/stream$/.test(path)) {
@@ -558,16 +709,46 @@ async function handleRequest({
     return handlePreviewProxy({ request, store, applications, requestId, path });
   }
   if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/repair$/.test(path)) {
-    return handleWorkspaceRepair({ request, store, repair, requestId, path });
+    return handleWorkspaceRepair({
+      request,
+      store,
+      repair,
+      requestId,
+      path,
+      config,
+      budgets,
+      audit,
+      aiRateLimiter,
+    });
   }
   if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/repair\/verify$/.test(path)) {
-    return handleRepairVerify({ request, store, repair, requestId, path });
+    return handleRepairVerify({
+      request,
+      store,
+      repair,
+      requestId,
+      path,
+      config,
+      budgets,
+      audit,
+      aiRateLimiter,
+    });
   }
   if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/context$/.test(path)) {
     return handleProjectContext({ request, store, workspace, execution, requestId, path });
   }
   if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/pipeline\/run$/.test(path)) {
-    return handlePipelineRun({ request, store, pipeline, requestId, path });
+    return handlePipelineRun({
+      request,
+      store,
+      pipeline,
+      requestId,
+      path,
+      config,
+      budgets,
+      audit,
+      aiRateLimiter,
+    });
   }
   if (request.method === "GET" && /^\/api\/v1\/projects\/[^/]+\/pipeline\/runs$/.test(path)) {
     return handlePipelineList({ request, store, pipeline, requestId, path });
@@ -598,7 +779,7 @@ async function handleRequest({
   }
 
   if (request.method === "POST" && /^\/api\/v1\/workflows\/[^/]+\/approve$/.test(path)) {
-    return handleApproveWorkflowCheckpoint({ request, store, ai, requestId, path });
+    return handleApproveWorkflowCheckpoint({ request, store, ai, audit, requestId, path });
   }
 
   if (request.method === "POST" && /^\/api\/v1\/workflows\/[^/]+\/retry$/.test(path)) {
@@ -738,6 +919,40 @@ function publicUser(user) {
 function bearerToken(request) {
   const header = request.headers.get("authorization") ?? "";
   return header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : null;
+}
+
+/**
+ * AI-route governance: per-user rate limiting plus a pre-call budget check so
+ * clients get an immediate 429 instead of a run that fails mid-flight. Every
+ * rejection is audited.
+ */
+function enforceAiGovernance(
+  access,
+  { projectId = null, aiRateLimiter, budgets, audit, config, requestId },
+) {
+  const user = access?.user;
+  if (!user) return; // route-level auth already produced its own error
+  if (aiRateLimiter.isLimited(`ai:${user.id}`, config.aiRateLimitMax, config.aiRateLimitWindowMs)) {
+    audit.record({
+      type: "governance.rate_limited",
+      userId: user.id,
+      projectId,
+      outcome: "rejected",
+      details: { limit: config.aiRateLimitMax, windowMs: config.aiRateLimitWindowMs },
+    });
+    throw Object.assign(new Error("Too many AI requests from this account; please retry later"), {
+      status: 429,
+      code: "RATE_LIMITED",
+    });
+  }
+  try {
+    budgets.authorize({ userId: user.id, projectId });
+  } catch (error) {
+    if (error instanceof BudgetExceededError) {
+      throw Object.assign(new Error(error.message), { status: 429, code: error.code });
+    }
+    throw error;
+  }
 }
 
 function requireProjectAccess(request, store, projectId, requestId) {
@@ -949,7 +1164,7 @@ async function handleCancelWorkflow({ request, store, ai, requestId, path }) {
   }
 }
 
-async function handleRegister({ request, config, store, registerRateLimiter, requestId }) {
+async function handleRegister({ request, config, store, registerRateLimiter, audit, requestId }) {
   const body = await parseJsonBody(request);
   const name = String(body.name ?? "").trim();
   const email = String(body.email ?? "")
@@ -1023,6 +1238,7 @@ async function handleRegister({ request, config, store, registerRateLimiter, req
   // Generate and set email verification token
   const verificationToken = `verify_${randomUUID()}`;
   store.setEmailVerificationToken(user.id, verificationToken);
+  audit.record({ type: "auth.register", userId: user.id, details: { email } });
 
   let verificationEmailSent = false;
   try {
@@ -1048,7 +1264,7 @@ async function handleRegister({ request, config, store, registerRateLimiter, req
   return jsonResponse(201, response, { "x-correlation-id": requestId });
 }
 
-async function handleLogin({ request, config, store, loginRateLimiter, requestId }) {
+async function handleLogin({ request, config, store, loginRateLimiter, audit, requestId }) {
   const body = await parseJsonBody(request);
   const email = String(body.email ?? "")
     .trim()
@@ -1082,6 +1298,12 @@ async function handleLogin({ request, config, store, loginRateLimiter, requestId
     ? await verifyPassword(password, user.passwordHash, config.jwtSecret)
     : { valid: false };
   if (!user || !passwordCheck.valid) {
+    audit.record({
+      type: "auth.login",
+      userId: user?.id ?? null,
+      outcome: "failure",
+      details: { email, reason: "invalid_credentials" },
+    });
     return jsonResponse(401, {
       error: {
         code: "INVALID_CREDENTIALS",
@@ -1119,6 +1341,7 @@ async function handleLogin({ request, config, store, loginRateLimiter, requestId
 
   // Reset rate limiter on successful login
   loginRateLimiter.reset(`login:${email}`);
+  audit.record({ type: "auth.login", userId: user.id, outcome: "success", details: { email } });
 
   return jsonResponse(200, {
     token: session.token,
@@ -1208,7 +1431,7 @@ async function handleGetDashboard({ request, store, requestId }) {
   );
 }
 
-async function handleCreateProject({ request, store, requestId }) {
+async function handleCreateProject({ request, store, audit, requestId }) {
   const auth = requireAuth(request, store);
   if ("error" in auth) {
     return auth.error;
@@ -1247,11 +1470,25 @@ async function handleCreateProject({ request, store, requestId }) {
     keyFeatures,
     techStack,
   });
+  audit.record({
+    type: "project.created",
+    userId: auth.user.id,
+    projectId: project.id,
+    details: { name },
+  });
 
   return jsonResponse(201, project, { "x-correlation-id": requestId });
 }
 
-async function handleAnalyzeProject({ request, config, store, requestId }) {
+async function handleAnalyzeProject({
+  request,
+  config,
+  store,
+  requestId,
+  budgets,
+  audit,
+  aiRateLimiter,
+}) {
   const auth = requireAuth(request, store);
   if ("error" in auth) {
     return auth.error;
@@ -1279,9 +1516,15 @@ async function handleAnalyzeProject({ request, config, store, requestId }) {
   }
 
   try {
+    enforceAiGovernance(auth, { aiRateLimiter, budgets, audit, config, requestId });
     const analysis = await analyzeProjectBrief({ name, description, conversation }, config);
     return jsonResponse(200, analysis, { "x-correlation-id": requestId });
   } catch (error) {
+    if (error.status === 429) {
+      return jsonResponse(429, {
+        error: { code: error.code ?? "RATE_LIMITED", message: error.message, requestId },
+      });
+    }
     const code = error?.code ?? "AI_PROVIDER_ERROR";
     const status = code === "AI_NOT_CONFIGURED" ? 503 : 502;
     return jsonResponse(status, {
@@ -1295,7 +1538,15 @@ async function handleAnalyzeProject({ request, config, store, requestId }) {
   }
 }
 
-async function handleVoiceTurn({ request, config, store, requestId }) {
+async function handleVoiceTurn({
+  request,
+  config,
+  store,
+  requestId,
+  budgets,
+  audit,
+  aiRateLimiter,
+}) {
   const auth = requireAuth(request, store);
   if ("error" in auth) {
     return auth.error;
@@ -1322,9 +1573,15 @@ async function handleVoiceTurn({ request, config, store, requestId }) {
   }
 
   try {
+    enforceAiGovernance(auth, { aiRateLimiter, budgets, audit, config, requestId });
     const reply = await respondToVoiceTurn({ name, messages }, config);
     return jsonResponse(200, { reply }, { "x-correlation-id": requestId });
   } catch (error) {
+    if (error.status === 429) {
+      return jsonResponse(429, {
+        error: { code: error.code ?? "RATE_LIMITED", message: error.message, requestId },
+      });
+    }
     const code = error?.code ?? "AI_PROVIDER_ERROR";
     return jsonResponse(code === "AI_NOT_CONFIGURED" ? 503 : 502, {
       error: {
@@ -1337,7 +1594,15 @@ async function handleVoiceTurn({ request, config, store, requestId }) {
   }
 }
 
-async function handleVoiceTranscription({ request, config, store, requestId }) {
+async function handleVoiceTranscription({
+  request,
+  config,
+  store,
+  requestId,
+  budgets,
+  audit,
+  aiRateLimiter,
+}) {
   const auth = requireAuth(request, store);
   if ("error" in auth) return auth.error;
 
@@ -1355,6 +1620,7 @@ async function handleVoiceTranscription({ request, config, store, requestId }) {
   }
 
   try {
+    enforceAiGovernance(auth, { aiRateLimiter, budgets, audit, config, requestId });
     const transcript = await transcribeVoiceNote(
       {
         audio: Buffer.from(await file.arrayBuffer()),
@@ -1364,6 +1630,11 @@ async function handleVoiceTranscription({ request, config, store, requestId }) {
     );
     return jsonResponse(200, { transcript }, { "x-correlation-id": requestId });
   } catch (error) {
+    if (error.status === 429) {
+      return jsonResponse(429, {
+        error: { code: error.code ?? "RATE_LIMITED", message: error.message, requestId },
+      });
+    }
     const code = error?.code ?? "AI_PROVIDER_ERROR";
     return jsonResponse(code === "AI_NOT_CONFIGURED" ? 503 : 502, {
       error: {
@@ -1835,7 +2106,17 @@ async function handleVerifyEmail({ request, store, requestId }) {
   });
 }
 
-async function handleStartProjectWorkflow({ request, store, ai, requestId, path }) {
+async function handleStartProjectWorkflow({
+  request,
+  store,
+  ai,
+  requestId,
+  path,
+  config,
+  budgets,
+  audit,
+  aiRateLimiter,
+}) {
   const projectId = path.split("/")[4];
   const access = requireProjectAccess(request, store, projectId, requestId);
   if ("error" in access) return access.error;
@@ -1844,6 +2125,7 @@ async function handleStartProjectWorkflow({ request, store, ai, requestId, path 
   let workflow = ai.orchestrator.getWorkflowForProject(projectId);
   let created = false;
   try {
+    enforceAiGovernance(access, { projectId, aiRateLimiter, budgets, audit, config, requestId });
     if (
       !workflow ||
       (body.restart === true && ["completed", "failed", "cancelled"].includes(workflow.status))
@@ -1852,6 +2134,11 @@ async function handleStartProjectWorkflow({ request, store, ai, requestId, path 
       created = true;
     }
   } catch (error) {
+    if (error.status === 429) {
+      return jsonResponse(429, {
+        error: { code: error.code ?? "RATE_LIMITED", message: error.message, requestId },
+      });
+    }
     return workflowErrorResponse(error, requestId, "WORKFLOW_START_FAILED");
   }
 
@@ -2287,12 +2574,23 @@ async function handleExecutionStream({
   });
 }
 
-async function handleWorkspaceRepair({ request, store, repair, requestId, path }) {
+async function handleWorkspaceRepair({
+  request,
+  store,
+  repair,
+  requestId,
+  path,
+  config,
+  budgets,
+  audit,
+  aiRateLimiter,
+}) {
   const projectId = workspaceProjectId(path);
   const access = requireProjectAccess(request, store, projectId, requestId);
   if ("error" in access) return access.error;
   try {
     const body = await parseJsonBody(request);
+    enforceAiGovernance(access, { projectId, aiRateLimiter, budgets, audit, config, requestId });
     const proposal = await repair.propose({
       project: access.project,
       jobId: body.jobId,
@@ -2300,6 +2598,11 @@ async function handleWorkspaceRepair({ request, store, repair, requestId, path }
     });
     return jsonResponse(200, proposal, { "x-correlation-id": requestId });
   } catch (error) {
+    if (error.status === 429) {
+      return jsonResponse(429, {
+        error: { code: error.code ?? "RATE_LIMITED", message: error.message, requestId },
+      });
+    }
     const providerError = RepairService.providerErrorResponse(error, requestId);
     if (providerError) return jsonResponse(providerError.status, providerError.body);
     if (error.status === 404) {
@@ -2311,7 +2614,17 @@ async function handleWorkspaceRepair({ request, store, repair, requestId, path }
   }
 }
 
-async function handleRepairVerify({ request, store, repair, requestId, path }) {
+async function handleRepairVerify({
+  request,
+  store,
+  repair,
+  requestId,
+  path,
+  config,
+  budgets,
+  audit,
+  aiRateLimiter,
+}) {
   const projectId = workspaceProjectId(path);
   const access = requireProjectAccess(request, store, projectId, requestId);
   if ("error" in access) return access.error;
@@ -2369,7 +2682,17 @@ async function handleProjectContext({ request, store, workspace, execution, requ
   );
 }
 
-async function handlePipelineRun({ request, store, pipeline, requestId, path }) {
+async function handlePipelineRun({
+  request,
+  store,
+  pipeline,
+  requestId,
+  path,
+  config,
+  budgets,
+  audit,
+  aiRateLimiter,
+}) {
   const projectId = workspaceProjectId(path);
   const access = requireProjectAccess(request, store, projectId, requestId);
   if ("error" in access) return access.error;
@@ -2381,12 +2704,23 @@ async function handlePipelineRun({ request, store, pipeline, requestId, path }) 
     options = {};
   }
   try {
+    enforceAiGovernance(access, { projectId, aiRateLimiter, budgets, audit, config, requestId });
     const run = pipeline.start({ project: access.project, options });
     return jsonResponse(202, { run }, { "x-correlation-id": requestId });
   } catch (error) {
+    if (error.status === 403) {
+      return jsonResponse(403, {
+        error: { code: "AUTONOMOUS_APPROVAL_REQUIRED", message: error.message, requestId },
+      });
+    }
     if (error.status === 409) {
       return jsonResponse(409, {
         error: { code: "PIPELINE_ALREADY_RUNNING", message: error.message, requestId },
+      });
+    }
+    if (error.status === 429) {
+      return jsonResponse(429, {
+        error: { code: error.code ?? "RATE_LIMITED", message: error.message, requestId },
       });
     }
     return workspaceErrorResponse(error, requestId);
@@ -2548,7 +2882,7 @@ async function handleGitHubExport({ request, store, workspace, github, requestId
   }
 }
 
-async function handleApproveWorkflowCheckpoint({ request, store, ai, requestId, path }) {
+async function handleApproveWorkflowCheckpoint({ request, store, ai, audit, requestId, path }) {
   const access = requireWorkflowAccess(request, store, ai, path.split("/")[4], requestId);
   if ("error" in access) return access.error;
 
@@ -2563,6 +2897,13 @@ async function handleApproveWorkflowCheckpoint({ request, store, ai, requestId, 
       approved,
       comments,
       revise,
+    });
+    audit.record({
+      type: "workflow.approval_decision",
+      userId: access.user.id,
+      projectId: workflow.projectId,
+      outcome: approved ? "approved" : "rejected",
+      details: { workflowId: workflow.id, checkpointType, revise },
     });
     if (approved && workflow.status === "running") {
       const run = ai.orchestrator.runNextSteps(workflow.id);

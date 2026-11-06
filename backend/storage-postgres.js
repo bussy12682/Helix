@@ -60,10 +60,14 @@ function tableForKey(kind, key) {
     taskflows: "taskflows",
     executionJobs: "execution_jobs",
     pipelineRuns: "pipeline_runs",
+    budgetUsage: "budget_usage",
+    auditEvents: "audit_events",
   };
   const keyColumns = {
     executionJobs: "id",
     pipelineRuns: "id",
+    budgetUsage: "scope_key",
+    auditEvents: "id",
   };
   return {
     table: tables[kind],
@@ -96,6 +100,8 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
   const taskflows = new Map();
   const executionJobs = new Map();
   const pipelineRuns = new Map();
+  const budgetUsage = new Map();
+  const auditEvents = new Map();
 
   const dirty = new Map(); // `${kind}:${key}` -> { kind, key, action: "upsert" | "delete" }
   const state = {
@@ -237,6 +243,23 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
           sql: "INSERT INTO pipeline_runs (id, project_id, status, started_at, doc, updated_at) VALUES ($1, $2, $3, $4, $5::jsonb, now()) ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, doc = EXCLUDED.doc, updated_at = now()",
           params: [value.id, value.projectId, value.status, value.startedAt, JSON.stringify(value)],
         };
+      case "budgetUsage":
+        return {
+          sql: "INSERT INTO budget_usage (scope_key, doc, updated_at) VALUES ($1, $2::jsonb, now()) ON CONFLICT (scope_key) DO UPDATE SET doc = EXCLUDED.doc, updated_at = now()",
+          params: [value.key ?? value.scopeKey ?? key, JSON.stringify(value)],
+        };
+      case "auditEvents":
+        return {
+          sql: "INSERT INTO audit_events (id, user_id, project_id, type, created_at, doc) VALUES ($1, $2, $3, $4, $5, $6::jsonb) ON CONFLICT (id) DO UPDATE SET doc = EXCLUDED.doc",
+          params: [
+            value.id,
+            value.userId,
+            value.projectId,
+            value.type,
+            value.createdAt,
+            JSON.stringify(value),
+          ],
+        };
       default:
         throw new Error(`Unknown entity kind: ${kind}`);
     }
@@ -264,6 +287,10 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
         return executionJobs.get(key);
       case "pipelineRuns":
         return pipelineRuns.get(key);
+      case "budgetUsage":
+        return budgetUsage.get(key);
+      case "auditEvents":
+        return auditEvents.get(key);
       default:
         return null;
     }
@@ -319,6 +346,8 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
     for (const [key] of taskflows) mark("taskflows", key);
     for (const [key] of executionJobs) mark("executionJobs", key);
     for (const [key] of pipelineRuns) mark("pipelineRuns", key);
+    for (const [key] of budgetUsage) mark("budgetUsage", key);
+    for (const [key] of auditEvents) mark("auditEvents", key);
   }
 
   function scheduleFlush(immediate = false) {
@@ -359,6 +388,8 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
       taskflowRows,
       jobRows,
       runRows,
+      budgetRows,
+      auditRows,
     ] = await Promise.all([
       pool.query("SELECT doc FROM users"),
       pool.query("SELECT doc FROM sessions WHERE expires_at > now()"),
@@ -370,6 +401,8 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
       pool.query("SELECT doc FROM taskflows"),
       pool.query("SELECT doc FROM execution_jobs"),
       pool.query("SELECT doc FROM pipeline_runs"),
+      pool.query("SELECT scope_key, doc FROM budget_usage"),
+      pool.query("SELECT doc FROM audit_events"),
     ]);
     for (const row of userRows.rows) users.set(row.doc.id, row.doc);
     for (const row of sessionRows.rows) sessions.set(row.doc.token, row.doc);
@@ -387,6 +420,8 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
     for (const row of taskflowRows.rows) taskflows.set(row.doc.id, row.doc);
     for (const row of jobRows.rows) executionJobs.set(row.doc.id, row.doc);
     for (const row of runRows.rows) pipelineRuns.set(row.doc.id, row.doc);
+    for (const row of budgetRows.rows) budgetUsage.set(row.scope_key ?? row.doc.key, row.doc);
+    for (const row of auditRows.rows) auditEvents.set(row.doc.id, row.doc);
 
     // Boot hygiene: purge expired credentials outright.
     await pool.query("DELETE FROM sessions WHERE expires_at <= now()");
@@ -714,6 +749,43 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
     return [...pipelineRuns.values()];
   }
 
+  function saveBudgetUsage(record) {
+    const key = record.key ?? record.scopeKey;
+    budgetUsage.set(key, record);
+    mark("budgetUsage", key);
+    scheduleFlush(true);
+    return record;
+  }
+
+  function deleteBudgetUsage(key) {
+    const deleted = budgetUsage.delete(key);
+    if (deleted) {
+      mark("budgetUsage", key, "delete");
+      scheduleFlush(true);
+    }
+    return deleted;
+  }
+
+  function saveAuditEvent(event) {
+    auditEvents.set(event.id, event);
+    mark("auditEvents", event.id);
+    scheduleFlush(true);
+    return event;
+  }
+
+  function deleteAuditEvent(id) {
+    const deleted = auditEvents.delete(id);
+    if (deleted) {
+      mark("auditEvents", id, "delete");
+      scheduleFlush(true);
+    }
+    return deleted;
+  }
+
+  function listAuditEvents() {
+    return [...auditEvents.values()];
+  }
+
   function listProjectsForUser(userId) {
     return [...projects.values()].filter((project) => project.ownerId === userId);
   }
@@ -810,6 +882,8 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
     taskflows,
     executionJobs,
     pipelineRuns,
+    budgetUsage,
+    auditEvents,
     mode: "postgres",
     ready,
     nextId,
@@ -836,6 +910,11 @@ export function createPostgresStore({ connectionString, poolSize = 10, logger = 
     savePipelineRun,
     deletePipelineRun,
     listPipelineRuns,
+    saveBudgetUsage,
+    deleteBudgetUsage,
+    saveAuditEvent,
+    deleteAuditEvent,
+    listAuditEvents,
     createUser,
     getUserByEmail,
     getUserById,

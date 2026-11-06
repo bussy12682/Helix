@@ -84,6 +84,7 @@ export class RepairService extends EventEmitter {
           "Diagnose the failure from the captured runtime output. Return complete replacement files only for changes needed to fix the observed failure. Do not claim the repair has been tested; HELIX verifies repairs by rerunning the command.",
       },
       onMeta: (value) => { meta = value; },
+      options: { usageContext: { projectId: project.id } },
     });
 
     const files = output.artifacts

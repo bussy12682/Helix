@@ -116,6 +116,7 @@ export class ExecutionService extends EventEmitter {
     bwrapPath = "bwrap",
     prlimitPath = "/usr/bin/prlimit",
     maxConcurrent = 2,
+    maxActiveJobsPerProject = ACTIVE_JOB_LIMIT_PER_PROJECT,
     persistence = null,
   } = {}) {
     super();
@@ -124,6 +125,10 @@ export class ExecutionService extends EventEmitter {
     this.bwrapPath = bwrapPath;
     this.prlimitPath = prlimitPath;
     this.maxConcurrent = Math.max(1, Math.min(8, Number(maxConcurrent) || 2));
+    this.maxActiveJobsPerProject = Math.max(
+      1,
+      Number(maxActiveJobsPerProject) || ACTIVE_JOB_LIMIT_PER_PROJECT,
+    );
     // Optional durable-record adapter: { saveJob, deleteJob }. When wired,
     // every job transition is written through so restarts can recover.
     this.persistence = persistence;
@@ -302,9 +307,9 @@ export class ExecutionService extends EventEmitter {
     const activeForProject = [...this.jobs.values()].filter(
       (candidate) => candidate.projectId === projectId && !candidate.completedAt,
     ).length;
-    if (activeForProject >= ACTIVE_JOB_LIMIT_PER_PROJECT) {
+    if (activeForProject >= this.maxActiveJobsPerProject) {
       throw new Error(
-        `A maximum of ${ACTIVE_JOB_LIMIT_PER_PROJECT} active execution jobs is allowed per project`,
+        `A maximum of ${this.maxActiveJobsPerProject} active execution jobs is allowed per project`,
       );
     }
     const job = {

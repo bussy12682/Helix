@@ -33,6 +33,7 @@ export class AutonomousPipeline extends EventEmitter {
     repairService,
     saveRun,
     persistence = null,
+    autoApproveEnabled = true,
   }) {
     super();
     this.setMaxListeners(0);
@@ -44,6 +45,10 @@ export class AutonomousPipeline extends EventEmitter {
     this.saveRun = saveRun;
     // Optional durable-record adapter: { saveRunRecord, deleteRunRecord }.
     this.persistence = persistence;
+    // Production approval policy: autonomous runs auto-approve human gates.
+    // Enabled by default outside production; must be explicitly enabled in
+    // production (see app.js wiring).
+    this.autoApproveEnabled = Boolean(autoApproveEnabled);
     this.runs = new Map();
     this.activeRuns = new Map();
   }
@@ -121,6 +126,14 @@ export class AutonomousPipeline extends EventEmitter {
    * Starts an autonomous run in the background and returns the running record.
    */
   start({ project, options = {} }) {
+    if (!this.autoApproveEnabled) {
+      throw Object.assign(
+        new Error(
+          "Autonomous execution is disabled: auto-approving human gates in production requires explicit opt-in (set HELIX_AUTONOMOUS_AUTO_APPROVE=true)",
+        ),
+        { status: 403 },
+      );
+    }
     const existing = [...this.runs.values()].find(
       (run) => run.projectId === project.id && run.status === "running",
     );
