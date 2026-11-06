@@ -99,10 +99,17 @@ function Summary() {
               ...current,
               keyFeatures: suggestions.keyFeatures,
               techStack: suggestions.techStack,
+              provider: suggestions.provider,
+              simulated: suggestions.simulated,
+              warning: suggestions.warning,
             }
           : current,
       );
-      toast.success("AI suggestions refreshed. You can edit them below.");
+      if (suggestions.simulated) {
+        toast.warning("Offline starter suggestions refreshed; no live AI provider was used.");
+      } else {
+        toast.success("AI suggestions refreshed. You can edit them below.");
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not refresh AI suggestions.");
     } finally {
@@ -155,6 +162,20 @@ function Summary() {
 
   return (
     <AppShell title="Project Summary" subtitle="Shape the brief before HELIX starts building">
+      {analysis.simulated ? (
+        <div
+          role="status"
+          className="mb-5 flex items-start gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm"
+        >
+          <Badge variant="outline" className="shrink-0 border-amber-500/40">
+            Offline draft
+          </Badge>
+          <p className="text-muted-foreground">
+            {analysis.warning ??
+              "No live AI provider was used. Review these deterministic starter suggestions before continuing."}
+          </p>
+        </div>
+      ) : null}
       <div className="grid gap-5 lg:grid-cols-[1.4fr_1fr]">
         <Panel
           title="Requirements"

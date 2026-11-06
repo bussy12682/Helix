@@ -160,6 +160,9 @@ export type ProjectAnalysis = {
   description: string;
   keyFeatures: string[];
   techStack: string[];
+  provider?: string | undefined;
+  simulated?: boolean | undefined;
+  warning?: string | undefined;
 };
 
 export async function analyzeProject(
@@ -275,7 +278,7 @@ export async function initiateGoogleOAuth() {
   window.localStorage.setItem("google_oauth_state", state);
 
   const params = new URLSearchParams({
-    client_id: import.meta.env["VITE_GOOGLE_CLIENT_ID"] || "demo-client-id",
+    client_id: import.meta.env["VITE_GOOGLE_CLIENT_ID"] || "",
     redirect_uri: `${window.location.origin}/auth/google/callback`,
     response_type: "code",
     scope: "openid profile email",
@@ -292,7 +295,7 @@ export async function initiateGitHubOAuth() {
   window.localStorage.setItem("github_oauth_state", state);
 
   const params = new URLSearchParams({
-    client_id: import.meta.env["VITE_GITHUB_CLIENT_ID"] || "demo-client-id",
+    client_id: import.meta.env["VITE_GITHUB_CLIENT_ID"] || "",
     redirect_uri: `${window.location.origin}/auth/github/callback`,
     scope: "user:email",
     state,
@@ -370,10 +373,21 @@ export async function verifyEmail(token: string) {
 }
 
 function generateRandomString(length: number): string {
+  if (!globalThis.crypto?.getRandomValues) {
+    throw new Error("A secure random generator is required for OAuth. Use a modern HTTPS browser.");
+  }
+
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+  const acceptanceLimit = Math.floor(256 / chars.length) * chars.length;
   let result = "";
-  for (let i = 0; i < length; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  while (result.length < length) {
+    const values = new Uint8Array(length - result.length);
+    globalThis.crypto.getRandomValues(values);
+    for (const value of values) {
+      if (value >= acceptanceLimit) continue;
+      result += chars.charAt(value % chars.length);
+      if (result.length === length) break;
+    }
   }
   return result;
 }
