@@ -12,6 +12,7 @@
     "format": "prettier --write .",
     "test": "node --test backend/tests/*.test.js",
     "test:ui": "vitest run",
+    "verify:providers": "node backend/scripts/verify-providers.mjs",
     "typecheck": "tsc --noEmit -p .",
     "start:api": "node backend/index.js"
   },
